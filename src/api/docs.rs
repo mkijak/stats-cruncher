@@ -1,21 +1,23 @@
 use utoipa::OpenApi;
 
 use crate::api::dto::{
-    ErrorResponse, HealthResponse, NumericStatsDto, QueryRequest, QueryResponse, RangeDto,
+    ErrorResponse, NumericStatsDto, QueryRequest, QueryResponse, RangeDto, StatusResponse,
+    WindowCounts,
 };
 
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        crate::api::handlers::health,
+        crate::api::handlers::status,
         crate::api::handlers::query,
     ),
     components(schemas(
+        StatusResponse,
+        WindowCounts,
         QueryRequest,
         RangeDto,
         QueryResponse,
         NumericStatsDto,
-        HealthResponse,
         ErrorResponse,
     )),
     info(

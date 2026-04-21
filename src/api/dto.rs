@@ -86,15 +86,22 @@ impl From<NumericStats> for NumericStatsDto {
     }
 }
 
+/// Response body for GET /status.
 #[derive(Debug, Serialize, ToSchema)]
-pub struct HealthResponse {
-    pub status: &'static str,
+pub struct StatusResponse {
+    /// Seconds since the process started.
+    pub uptime_secs: u64,
+    /// Number of rows loaded into the in-memory store.
+    pub rows_loaded: u64,
+    pub queries: WindowCounts,
+    pub errors: WindowCounts,
 }
 
-impl HealthResponse {
-    pub fn ok() -> Self {
-        Self { status: "ok" }
-    }
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WindowCounts {
+    pub last_1m: u64,
+    pub last_1h: u64,
+    pub last_24h: u64,
 }
 
 /// Error response body.

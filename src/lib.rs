@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod execution;
 pub mod ingestion;
+pub mod metrics;
 pub mod query;
 pub mod resource;
 pub mod storage;

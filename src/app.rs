@@ -4,28 +4,32 @@ use tokio::net::TcpListener;
 use tokio::signal;
 
 use crate::api;
+use crate::api::AppState;
 use crate::config::AppConfig;
 use crate::error::{AppError, AppResult};
 use crate::execution::Coordinator;
 use crate::ingestion;
+use crate::metrics::Metrics;
 use crate::storage::ColumnStore;
 
 pub struct App {
     cfg: AppConfig,
     store: Arc<ColumnStore>,
-    coordinator: Arc<Coordinator>,
+    state: AppState,
 }
 
 impl App {
     pub async fn bootstrap(cfg: AppConfig) -> AppResult<Self> {
         let store = Arc::new(ingestion::run(&cfg).await?);
         let coordinator = Arc::new(Coordinator::start(cfg.clone(), store.clone()));
-        Ok(Self { cfg, store, coordinator })
+        let metrics = Arc::new(Metrics::new(store.row_count() as u64));
+        let state = AppState { coordinator, metrics };
+        Ok(Self { cfg, store, state })
     }
 
     pub async fn run(self) -> AppResult<()> {
         let _ = self.store;
-        let router = api::router(self.coordinator);
+        let router = api::router(self.state);
         let bind = self.cfg.api.bind.as_str();
         let listener = TcpListener::bind(bind).await.map_err(|e| {
             AppError::Execution(format!("binding HTTP listener to {bind:?}: {e}"))
