@@ -13,6 +13,11 @@ pub struct AppConfig {
     /// Only columns listed here are pulled off the input source; anything else is dropped
     /// during ingestion to keep the in-memory footprint tight.
     pub searchable: BTreeMap<String, SearchableColumn>,
+    /// Optional partition column for chunk-level zone pruning. Must name a numeric or
+    /// date-time column in `[searchable]`. When set, all rows are sorted by this column
+    /// after ingestion and per-chunk min/max stats are recorded. Queries that include a
+    /// range filter on this column will skip chunks whose range doesn't overlap.
+    pub partition_column: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

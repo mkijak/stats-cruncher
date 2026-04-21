@@ -23,6 +23,7 @@ pub struct ColumnStore {
     lookup: HashMap<String, usize>,
     row_count: u32,
     chunk_size: usize,
+    zone_stats: Option<(String, Vec<(f64, f64)>)>,
 }
 
 impl ColumnStore {
@@ -47,6 +48,7 @@ impl ColumnStore {
             lookup,
             row_count: 0,
             chunk_size: cfg.engine.chunk_size_rows.max(1),
+            zone_stats: None,
         }
     }
 
@@ -80,6 +82,52 @@ impl ColumnStore {
         self.row_count().div_ceil(self.chunk_size)
     }
 
+    /// Per-chunk `(min, max)` for the partition column, if one was configured and
+    /// `sort_by` has been called. Indexed by chunk ordinal (chunk 0 = rows 0..chunk_size).
+    pub fn zone_stats(&self) -> Option<(&str, &[(f64, f64)])> {
+        self.zone_stats.as_ref().map(|(col, stats)| (col.as_str(), stats.as_slice()))
+    }
+
+    pub fn sort_by(&mut self, partition_column: &str) -> AppResult<()> {
+        let col_idx = *self.lookup.get(partition_column).ok_or_else(|| {
+            AppError::Config(format!(
+                "partition_column {partition_column:?} is not listed in [searchable]"
+            ))
+        })?;
+
+        let n = self.row_count as usize;
+        if n == 0 {
+            return Ok(());
+        }
+
+        let keys: Vec<f64> = match &self.columns[col_idx] {
+            Column::DateTime(v) => v.iter().map(|&x| x as f64).collect(),
+            Column::Integer(v) => v.iter().map(|&x| x as f64).collect(),
+            Column::Float(v) => v.clone(),
+            Column::String(_) => {
+                return Err(AppError::Config(format!(
+                    "partition_column {partition_column:?}: string columns are not supported"
+                )))
+            }
+        };
+
+        let mut perm: Vec<usize> = (0..n).collect();
+        perm.sort_by(|&a, &b| keys[a].total_cmp(&keys[b]));
+
+        for col in &mut self.columns {
+            apply_perm(col, &perm);
+        }
+
+        let sorted_keys: Vec<f64> = perm.iter().map(|&i| keys[i]).collect();
+        let zones: Vec<(f64, f64)> = sorted_keys
+            .chunks(self.chunk_size)
+            .map(|c| (*c.first().unwrap(), *c.last().unwrap()))
+            .collect();
+
+        self.zone_stats = Some((partition_column.to_owned(), zones));
+        Ok(())
+    }
+
     /// Append a single row. `values` must be in schema order (the same order as
     /// [`Self::column_names`]). The store handles type coercion and dictionary mapping
     pub fn push_row(&mut self, values: &[RawValue<'_>]) -> AppResult<()> {
@@ -99,6 +147,45 @@ impl ColumnStore {
             .checked_add(1)
             .ok_or_else(|| AppError::Ingestion("row count exceeds u32::MAX".into()))?;
         Ok(())
+    }
+}
+
+fn apply_perm(col: &mut Column, perm: &[usize]) {
+    match col {
+        Column::Integer(v) => {
+            let sorted: Vec<i64> = perm.iter().map(|&i| v[i]).collect();
+            *v = sorted;
+        }
+        Column::Float(v) => {
+            let sorted: Vec<f64> = perm.iter().map(|&i| v[i]).collect();
+            *v = sorted;
+        }
+        Column::DateTime(v) => {
+            let sorted: Vec<i64> = perm.iter().map(|&i| v[i]).collect();
+            *v = sorted;
+        }
+        Column::String(sc) => {
+            let n = perm.len();
+            let dict = &sc.dictionary;
+
+            // Invert postings bitmaps to a flat row -> code array
+            let mut row_to_code = vec![0u32; n];
+            for code in 0..dict.cardinality() as u32 {
+                for row in dict.postings(code).unwrap().iter() {
+                    row_to_code[row as usize] = code;
+                }
+            }
+
+            // Rebuild dictionary in permuted row order
+            let mut new_sc = StringColumn::new();
+            for (new_row, &old_row) in perm.iter().enumerate() {
+                let code = row_to_code[old_row];
+                let value = dict.value_of(code).unwrap();
+                new_sc.dictionary.intern(value, new_row as u32);
+                new_sc.count += 1;
+            }
+            *sc = new_sc;
+        }
     }
 }
 
@@ -233,6 +320,7 @@ mod tests {
             },
             api: ApiConfig { bind: "0.0.0.0:0".to_string() },
             searchable,
+            partition_column: None,
         }
     }
 

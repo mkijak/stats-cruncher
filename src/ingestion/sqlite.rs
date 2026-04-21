@@ -128,6 +128,7 @@ mod tests {
             },
             api: ApiConfig { bind: "0.0.0.0:0".into() },
             searchable,
+            partition_column: None,
         }
     }
 

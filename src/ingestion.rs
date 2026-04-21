@@ -34,6 +34,10 @@ pub async fn run(cfg: &AppConfig) -> AppResult<ColumnStore> {
     tokio::task::spawn_blocking(move || {
         let mut store = ColumnStore::new(&cfg);
         select(&cfg).ingest(&mut store)?;
+        if let Some(col) = &cfg.partition_column {
+            tracing::info!(column = col, rows = store.row_count(), "sorting rows by partition column");
+            store.sort_by(col)?;
+        }
         Ok(store)
     })
     .await

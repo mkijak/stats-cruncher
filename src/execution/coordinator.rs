@@ -11,7 +11,7 @@ use crate::error::{AppError, AppResult};
 use crate::execution::aggregator::{Aggregator, PartialResult};
 use crate::execution::chunk::{ChunkId, Task};
 use crate::execution::worker::Worker;
-use crate::query::{Query, QueryId, Response};
+use crate::query::{Comparison, Query, QueryId, RangeFilter, Response};
 use crate::resource;
 use crate::storage::{Column, ColumnStore};
 
@@ -116,6 +116,15 @@ impl Coordinator {
             return Ok(());
         }
 
+        // Build skip mask before query is moved into Arc
+        let skip_mask = build_skip_mask(chunk_count, &self.store, &query);
+        let dispatched = skip_mask.iter().filter(|&&s| !s).count();
+
+        if dispatched == 0 {
+            let _ = reply.send(Ok(Response::default()));
+            return Ok(());
+        }
+
         let query_id = self.next_query_id();
         let query_arc = Arc::new(query);
 
@@ -124,38 +133,40 @@ impl Coordinator {
             guard.insert(
                 query_id,
                 InflightQuery {
-                    aggregator: Aggregator::new(chunk_count),
+                    aggregator: Aggregator::new(dispatched),
                     reply: Some(reply),
                 },
             );
         }
 
-        let mut chunk_idx: u64 = 0;
+        let mut chunk_idx: usize = 0;
         let mut start = 0usize;
         while start < row_count {
             let end = (start + chunk_size).min(row_count);
-            let task = Task {
-                chunk_id: ChunkId(chunk_idx),
-                query_id,
-                query: query_arc.clone(),
-                rows: start..end,
-            };
+            if !skip_mask[chunk_idx] {
+                let task = Task {
+                    chunk_id: ChunkId(chunk_idx as u64),
+                    query_id,
+                    query: query_arc.clone(),
+                    rows: start..end,
+                };
+                if self.task_tx.send(task).is_err() {
+                    let mut guard = self
+                        .inflight
+                        .lock()
+                        .expect("inflight mutex poisoned");
+                    if let Some(mut state) = guard.remove(&query_id) {
+                        if let Some(tx) = state.reply.take() {
+                            let _ = tx.send(Err(AppError::Execution(
+                                "worker pool closed before query completed".into(),
+                            )));
+                        }
+                    }
+                    return Err(AppError::Execution("worker pool closed".into()));
+                }
+            }
             chunk_idx += 1;
             start = end;
-            if self.task_tx.send(task).is_err() {
-                let mut guard = self
-                    .inflight
-                    .lock()
-                    .expect("inflight mutex poisoned");
-                if let Some(mut state) = guard.remove(&query_id) {
-                    if let Some(tx) = state.reply.take() {
-                        let _ = tx.send(Err(AppError::Execution(
-                            "worker pool closed before query completed".into(),
-                        )));
-                    }
-                }
-                return Err(AppError::Execution("worker pool closed".into()));
-            }
         }
 
         Ok(())
@@ -179,6 +190,40 @@ fn finalize(state: &Mutex<HashMap<QueryId, InflightQuery>>, output: WorkerOutput
     if let Some(tx) = done.reply.take() {
         let _ = tx.send(Ok(response));
     }
+}
+
+fn build_skip_mask(chunk_count: usize, store: &ColumnStore, query: &Query) -> Vec<bool> {
+    let Some((col, stats)) = store.zone_stats() else {
+        return vec![false; chunk_count];
+    };
+    let Some(rf) = query.ranges.get(col) else {
+        return vec![false; chunk_count];
+    };
+    stats.iter().map(|&(lo, hi)| !zone_overlaps(lo, hi, rf)).collect()
+}
+
+fn zone_overlaps(chunk_min: f64, chunk_max: f64, rf: &RangeFilter) -> bool {
+    if let Some(upper) = rf.upper {
+        let in_range = match upper.comparison {
+            Comparison::Lt => chunk_min < upper.value,
+            Comparison::Lte => chunk_min <= upper.value,
+            _ => true,
+        };
+        if !in_range {
+            return false;
+        }
+    }
+    if let Some(lower) = rf.lower {
+        let in_range = match lower.comparison {
+            Comparison::Gt => chunk_max > lower.value,
+            Comparison::Gte => chunk_max >= lower.value,
+            _ => true,
+        };
+        if !in_range {
+            return false;
+        }
+    }
+    true
 }
 
 fn validate(query: &Query, store: &ColumnStore) -> AppResult<()> {
