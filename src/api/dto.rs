@@ -20,17 +20,27 @@ pub struct QueryRequest {
     #[serde(default)]
     pub must_not: BTreeMap<String, Vec<String>>,
 
-    /// Numeric or temporal boundary scans. Accepts any valid combination of gt, gte, lt, and lte. Each bound is either a JSON number (integer/float columns) or an RFC3339 date-time string (date-time columns).
+    /// Numeric or temporal boundary scans. Each entry is either a single range object or an array of range objects (OR semantics across the array). Each bound is either a JSON number (integer/float columns) or an RFC3339 date-time string (date-time columns).
     #[serde(default)]
-    pub ranges: BTreeMap<String, RangeDto>,
+    pub ranges: BTreeMap<String, RangeOrList>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RangeDto {
+    pub eq: Option<BoundValue>,
     pub gt: Option<BoundValue>,
     pub gte: Option<BoundValue>,
     pub lt: Option<BoundValue>,
     pub lte: Option<BoundValue>,
+}
+
+/// Accepts either a single range object or an array of range objects for the same column.
+/// Multiple ranges are combined with OR: a row matches if it satisfies any one of them.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum RangeOrList {
+    One(RangeDto),
+    Many(Vec<RangeDto>),
 }
 
 /// A single range bound. Either a raw JSON number for numeric columns or an
@@ -134,7 +144,15 @@ impl TryFrom<QueryRequest> for Query {
         let ranges = req
             .ranges
             .into_iter()
-            .map(|(k, r)| RangeFilter::try_from(r).map(|rf| (k, rf)))
+            .map(|(k, r)| {
+                let filters: Result<Vec<RangeFilter>, String> = match r {
+                    RangeOrList::One(dto) => RangeFilter::try_from(dto).map(|rf| vec![rf]),
+                    RangeOrList::Many(dtos) => {
+                        dtos.into_iter().map(RangeFilter::try_from).collect()
+                    }
+                };
+                filters.map(|v| (k, v))
+            })
             .collect::<Result<_, _>>()?;
         Ok(Query { must, must_not, ranges })
     }
@@ -146,6 +164,13 @@ impl TryFrom<RangeDto> for RangeFilter {
         let to_bound = |v: BoundValue, comparison: Comparison| -> Result<NumericBound, String> {
             Ok(NumericBound { value: f64::try_from(v)?, comparison })
         };
+        if let Some(v) = r.eq {
+            let val = f64::try_from(v)?;
+            return Ok(RangeFilter {
+                lower: Some(NumericBound { value: val, comparison: Comparison::Gte }),
+                upper: Some(NumericBound { value: val, comparison: Comparison::Lte }),
+            });
+        }
         let lower = match (r.gte, r.gt) {
             (Some(v), _) => Some(to_bound(v, Comparison::Gte)?),
             (None, Some(v)) => Some(to_bound(v, Comparison::Gt)?),

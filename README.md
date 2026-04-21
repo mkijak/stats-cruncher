@@ -102,6 +102,7 @@ Submits a boolean filter query to the engine. The JSON payload accepts three opt
     "event_type": ["test"]
   },
   "ranges": {
+    "user_id":     [{ "eq": 1001 }, { "eq": 1005 }, { "eq": 1012 }],
     "amount":      { "gte": 10, "lt": 100 },
     "occurred_at": { "gte": "2026-04-19T00:00:00Z", "lt": "2026-04-20T00:00:00Z" }
   }
@@ -110,7 +111,9 @@ Submits a boolean filter query to the engine. The JSON payload accepts three opt
 
 * **`must`**: An inclusion filter. For a given column, the row must match *at least one* of the provided exact values (Logical OR within the array). Multiple columns are intersected (Logical AND).
 * **`must_not`**: An exclusion filter. A row is dropped if it exactly matches *any* of the provided values across any of the listed columns.
-* **`ranges`**: Numeric or temporal boundary scans. Accepts any valid combination of `gt`, `gte`, `lt`, and `lte`. Dates must be valid RFC3339 strings; standard numbers are parsed as `f64` or `i64`.
+* **`ranges`**: Numeric or temporal boundary scans. Each column entry is either a single range object or an array of range objects — multiple ranges on the same column are OR'd together. Accepted bounds: `gt`, `gte`, `lt`, `lte`, and `eq` (exact match). Dates must be valid RFC3339 strings; numbers are parsed as `f64` or `i64`.
+
+To filter a numeric column by a discrete set of values, pass an array of `eq` objects:
 
 #### Querying a full day
 

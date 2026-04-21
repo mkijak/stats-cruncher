@@ -7,7 +7,7 @@ pub struct QueryId(pub u64);
 pub struct Query {
     pub must: Must,
     pub must_not: MustNot,
-    pub ranges: BTreeMap<String, RangeFilter>,
+    pub ranges: BTreeMap<String, Vec<RangeFilter>>,
 }
 
 #[derive(Debug, Clone, Default)]

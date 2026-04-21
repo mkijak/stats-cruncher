@@ -83,16 +83,16 @@ fn evaluate_filter(query: &Query, store: &ColumnStore, rows: Range<usize>) -> Ro
         }
     }
 
-    for (name, rf) in &query.ranges {
+    for (name, filters) in &query.ranges {
         match store.column(name) {
             Some(Column::Integer(v)) => retain_numeric(&mut bitmap, |row| {
-                range_matches(v[row] as f64, rf)
+                filters.iter().any(|rf| range_matches(v[row] as f64, rf))
             }),
             Some(Column::DateTime(v)) => retain_numeric(&mut bitmap, |row| {
-                range_matches(v[row] as f64, rf)
+                filters.iter().any(|rf| range_matches(v[row] as f64, rf))
             }),
             Some(Column::Float(v)) => retain_numeric(&mut bitmap, |row| {
-                range_matches(v[row], rf)
+                filters.iter().any(|rf| range_matches(v[row], rf))
             }),
             _ => return RoaringBitmap::new(),
         }
@@ -234,7 +234,7 @@ mod tests {
         }
         let mut r = BTreeMap::new();
         for (col, lo, up) in ranges {
-            r.insert((*col).to_string(), RangeFilter { lower: *lo, upper: *up });
+            r.insert((*col).to_string(), vec![RangeFilter { lower: *lo, upper: *up }]);
         }
         Query { must: Must(m), must_not: MustNot(mn), ranges: r }
     }

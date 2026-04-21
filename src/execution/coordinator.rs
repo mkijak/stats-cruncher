@@ -196,10 +196,14 @@ fn build_skip_mask(chunk_count: usize, store: &ColumnStore, query: &Query) -> Ve
     let Some((col, stats)) = store.zone_stats() else {
         return vec![false; chunk_count];
     };
-    let Some(rf) = query.ranges.get(col) else {
+    let Some(filters) = query.ranges.get(col) else {
         return vec![false; chunk_count];
     };
-    stats.iter().map(|&(lo, hi)| !zone_overlaps(lo, hi, rf)).collect()
+    // Skip a chunk only if it overlaps none of the filters (OR semantics across filters).
+    stats
+        .iter()
+        .map(|&(lo, hi)| !filters.iter().any(|rf| zone_overlaps(lo, hi, rf)))
+        .collect()
 }
 
 fn zone_overlaps(chunk_min: f64, chunk_max: f64, rf: &RangeFilter) -> bool {
