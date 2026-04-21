@@ -1,6 +1,6 @@
 # stats-cruncher
 
-`stats-cruncher` is an in-memory, read-optimized OLAP engine exposed via an HTTP API. Designed for high-throughput analytics, it ingests flat datasets at startup, converts them into a strictly typed, columnar memory layout, and executes fast boolean queries against them.
+`stats-cruncher` is an in-memory, read-optimized OLAP engine exposed via an HTTP API. Designed for high-throughput analytics, it ingests flat datasets at startup, loads them into memory, and executes fast boolean queries against them.
 
 It is built for scenarios where the working dataset fits within system RAM.
 
@@ -28,7 +28,7 @@ It is built for scenarios where the working dataset fits within system RAM.
    ./target/release/stats-cruncher --config config.toml
    ```
 
-   **Note on Boot Time:** On startup, the engine performs a one-time ingestion phase, parsing the source data and materializing it into optimized memory vectors and bitmaps. For massive datasets, this will take time. Once the memory layout is finalized, the HTTP API activates and begins accepting queries.
+   **Note on Boot Time:** On startup, the engine loads all source data into memory before accepting any requests. For large datasets this takes a moment. Once loading is complete the HTTP API activates.
 
 ## Configuration
 
@@ -48,7 +48,7 @@ Defines the ingestion mechanism. The engine currently supports two formats, conf
 Controls the concurrency model.
 
 * **`chunk_size_rows`**: Dictates the morsel size for parallel execution. This tunes the workload for CPU cache locality. Smaller values ensure fair scheduling across concurrent queries (preventing head-of-line blocking), while larger values reduce thread synchronization overhead. Leave at the default (`65_536`) unless profiling specific hardware.
-* **`worker_threads`**: The size of the dedicated compute pool used for heavy query resolution. This defines the number of physical CPU cores the application will dedicate to data crunching (note that asynchronous HTTP request handlers may cause total thread usage to slightly exceed this limit).
+* **`worker_threads`**: The size of the dedicated compute pool used for query execution. This defines the number of physical CPU cores the application will dedicate to data crunching (note that asynchronous HTTP request handlers may cause total thread usage to slightly exceed this limit). In a heavy load scenarios leave at least 1-2 cores free for other processes.
 
 ### `[api]`
 
@@ -56,14 +56,14 @@ Controls the concurrency model.
 
 ### `[searchable.<column>]`
 
-Acts as an explicit schema definition and projection pushdown. To keep the memory footprint aggressively tight, any column not explicitly declared here is dropped during the ingestion phase.
+Only columns declared here are loaded into memory. Any column not configured as searchable.*, even if it is available in the source data, is dropped during ingestion.
 
 Each entry maps a column to a logical type:
 
 * **`integer`**: 64-bit signed integer. Optimized for range scans.
 * **`float`**: 64-bit floating point. Optimized for range scans.
 * **`string`**: Text data. Dictionary-encoded into bitsets. Strictly for exact-match inclusion/exclusion filters (`must` / `must_not`).
-* **`date-time`**: RFC3339 timestamp strings (e.g., `2026-04-19T00:00:00Z`). Converted and stored internally as highly efficient UTC epoch-seconds.
+* **`date-time`**: RFC3339 timestamp strings (e.g., `2026-04-19T00:00:00Z`). Stored internally as UTC epoch-seconds.
 
 You may declare any number of date-time columns (`created_at`, `updated_at`, etc.). Clients specify which column to evaluate at query time.
 
@@ -76,13 +76,22 @@ The application automatically serves OpenAPI (Swagger) documentation, allowing y
 * **Swagger UI:** `/docs` (e.g., `http://localhost:8080/docs`)
 * **Raw OpenAPI JSON:** `/api-doc/openapi.json`
 
-### `GET /health`
+### `GET /status`
 
-Returns `200 OK` with `{"status": "ok"}` once the ingestion phase is complete and the compute pool is ready. Intended for load balancer liveness probes.
+Returns basic runtime stats. Useful for monitoring and confirming the service is up and data is loaded.
+
+```json
+{
+  "uptime_secs": 3600,
+  "rows_loaded": 10000000,
+  "queries": { "last_1m": 5, "last_1h": 42, "last_24h": 300 },
+  "errors":  { "last_1m": 0, "last_1h": 1,  "last_24h": 3  }
+}
+```
 
 ### `POST /query`
 
-Submits a boolean filter query to the engine. The JSON payload accepts three optional operational blocks: `must`, `must_not`, and `ranges`. An empty query matches the entire dataset.
+Submits a boolean filter query to the engine. The JSON payload accepts three optional filter clauses: `must`, `must_not`, and `ranges`. An empty query matches the entire dataset.
 
 ```json
 {
@@ -103,9 +112,9 @@ Submits a boolean filter query to the engine. The JSON payload accepts three opt
 * **`must_not`**: An exclusion filter. A row is dropped if it exactly matches *any* of the provided values across any of the listed columns.
 * **`ranges`**: Numeric or temporal boundary scans. Accepts any valid combination of `gt`, `gte`, `lt`, and `lte`. Dates must be valid RFC3339 strings; standard numbers are parsed as `f64` or `i64`.
 
-#### Deterministic Time Bounding (Day-Granularity)
+#### Querying a full day
 
-To prevent timezone ambiguity, the API strictly requires RFC3339 timestamps and rejects bare dates (like `2026-04-19`). To query an entire day, supply a half-open interval. This guarantees the server never has to infer client intent:
+The API requires full RFC3339 timestamps — bare dates like `2026-04-19` are not accepted. To cover an entire day use a half-open interval:
 
 ```json
 "ranges": {

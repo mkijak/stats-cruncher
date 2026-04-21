@@ -22,7 +22,7 @@ gzip = true
 # table = "events"
 
 # --- engine -------------------------------------------------------------------
-# Tuning knobs for the execution layer.
+# Performance tuning.
 
 [engine]
 # Hard RAM ceiling for the columnar store. Exceeding it during ingestion is a
@@ -36,13 +36,15 @@ memory_limit = "8GiB"
 # more scheduling overhead; larger = less overhead but coarser parallelism.
 chunk_size_rows = 65_536
 
-# Dedicated CPU-bound worker threads. Kept separate from the Tokio runtime so
-# long scans don't starve async I/O. Typically set to the number of physical
-# cores.
-worker_threads = 8
+# The size of the dedicated compute pool used for query execution.
+# This defines the number of physical CPU cores the application will dedicate
+# to data crunching (note that asynchronous HTTP request handlers may cause total
+# thread usage to slightly exceed this limit). In a heavy load scenarios leave
+# at least 1-2 cores free for other processes.
+worker_threads = 2
 
 # --- api ----------------------------------------------------------------------
-# HTTP surface exposing /health and /query.
+# HTTP surface exposing /status and /query.
 
 [api]
 bind = "0.0.0.0:8080"
@@ -72,3 +74,10 @@ type = "string"
 
 [searchable.occurred_at]
 type = "date-time"
+
+# --- partition column (optional) ----------------------------------------------
+# For typical OLAP queries aiming at getting statistics for specific date-time
+# ranges, providing a column name in partition_column significantly speeds up
+# processing. Numeric types (integer, float) are also supported.
+
+# partition_column = "occurred_at"
