@@ -11,6 +11,9 @@ use crate::api::dto::{
         crate::api::handlers::status,
         crate::api::handlers::query,
     ),
+    tags(
+          (name = "Stats", description = "Stats cruncher endpoints"),
+    ),
     components(schemas(
         StatusResponse,
         WindowCounts,

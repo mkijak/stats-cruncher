@@ -10,6 +10,7 @@ use crate::query::Query;
 #[utoipa::path(
     get,
     path = "/status",
+    tag = "Stats",
     responses(
         (status = 200, description = "Runtime stats", body = StatusResponse)
     )
@@ -27,6 +28,7 @@ pub async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
 #[utoipa::path(
     post,
     path = "/query",
+    tag = "Stats",
     request_body = QueryRequest,
     responses(
         (status = 200, description = "Query executed successfully", body = QueryResponse),
