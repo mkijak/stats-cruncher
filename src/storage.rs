@@ -4,9 +4,10 @@ mod dictionary;
 pub use column::{Column, ColumnName, StringColumn};
 pub use dictionary::StringDictionary;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::DateTime;
+use roaring::RoaringBitmap;
 
 use crate::config::{AppConfig, ColumnType};
 use crate::error::{AppError, AppResult};
@@ -24,6 +25,7 @@ pub struct ColumnStore {
     row_count: u32,
     chunk_size: usize,
     zone_stats: Option<(String, Vec<(f64, f64)>)>,
+    null_rows: BTreeMap<String, RoaringBitmap>,
 }
 
 impl ColumnStore {
@@ -49,6 +51,7 @@ impl ColumnStore {
             row_count: 0,
             chunk_size: cfg.engine.chunk_size_rows.max(1),
             zone_stats: None,
+            null_rows: BTreeMap::new(),
         }
     }
 
@@ -88,6 +91,11 @@ impl ColumnStore {
         self.zone_stats.as_ref().map(|(col, stats)| (col.as_str(), stats.as_slice()))
     }
 
+    /// Null row bitmap for a column, if any null values were ingested.
+    pub fn null_rows_for(&self, name: &str) -> Option<&RoaringBitmap> {
+        self.null_rows.get(name)
+    }
+
     pub fn sort_by(&mut self, partition_column: &str) -> AppResult<()> {
         let col_idx = *self.lookup.get(partition_column).ok_or_else(|| {
             AppError::Config(format!(
@@ -118,6 +126,16 @@ impl ColumnStore {
             apply_perm(col, &perm);
         }
 
+        if !self.null_rows.is_empty() {
+            let mut old_to_new = vec![0u32; n];
+            for (new_idx, &old_idx) in perm.iter().enumerate() {
+                old_to_new[old_idx] = new_idx as u32;
+            }
+            for nulls in self.null_rows.values_mut() {
+                *nulls = nulls.iter().map(|r| old_to_new[r as usize]).collect();
+            }
+        }
+
         let sorted_keys: Vec<f64> = perm.iter().map(|&i| keys[i]).collect();
         let zones: Vec<(f64, f64)> = sorted_keys
             .chunks(self.chunk_size)
@@ -140,7 +158,10 @@ impl ColumnStore {
         }
         let row_id = self.row_count;
         for (idx, value) in values.iter().enumerate() {
-            push_value(&mut self.columns[idx], &self.names[idx], value, row_id)?;
+            let has_value = push_value(&mut self.columns[idx], &self.names[idx], value, row_id)?;
+            if !has_value {
+                self.null_rows.entry(self.names[idx].clone()).or_default().insert(row_id);
+            }
         }
         self.row_count = self
             .row_count
@@ -168,18 +189,21 @@ fn apply_perm(col: &mut Column, perm: &[usize]) {
             let n = perm.len();
             let dict = &sc.dictionary;
 
-            // Invert postings bitmaps to a flat row -> code array
-            let mut row_to_code = vec![0u32; n];
+            // u32::MAX is a sentinel meaning "null — no posting for this row"
+            let mut row_to_code = vec![u32::MAX; n];
             for code in 0..dict.cardinality() as u32 {
                 for row in dict.postings(code).unwrap().iter() {
                     row_to_code[row as usize] = code;
                 }
             }
 
-            // Rebuild dictionary in permuted row order
+            // Rebuild dictionary in permuted row order, skipping null rows
             let mut new_sc = StringColumn::new();
             for (new_row, &old_row) in perm.iter().enumerate() {
                 let code = row_to_code[old_row];
+                if code == u32::MAX {
+                    continue;
+                }
                 let value = dict.value_of(code).unwrap();
                 new_sc.dictionary.intern(value, new_row as u32);
                 new_sc.count += 1;
@@ -209,16 +233,25 @@ impl RawValue<'_> {
     }
 }
 
+/// Returns `true` when a real value was stored, `false` when the value is null/missing
+/// (a dummy was stored in numeric columns; string columns simply have no posting for this row).
+/// The caller records the row index in `null_rows` when `false` is returned.
 fn push_value(
     column: &mut Column,
     name: &str,
     value: &RawValue<'_>,
     row: u32,
-) -> AppResult<()> {
-    if matches!(value, RawValue::Null) {
-        return Err(AppError::Ingestion(format!(
-            "column {name:?}: NULL values are not supported",
-        )));
+) -> AppResult<bool> {
+    let is_null = matches!(value, RawValue::Null)
+        || matches!(value, RawValue::Str(s) if s.trim().is_empty());
+    if is_null {
+        match column {
+            Column::Integer(v) => v.push(0),
+            Column::Float(v) => v.push(0.0),
+            Column::DateTime(v) => v.push(0),
+            Column::String(_) => {} // null rows have no postings entry
+        }
+        return Ok(false);
     }
     match column {
         Column::Integer(v) => v.push(coerce_integer(name, value)?),
@@ -230,7 +263,7 @@ fn push_value(
         }
         Column::DateTime(v) => v.push(coerce_datetime(name, value)?),
     }
-    Ok(())
+    Ok(true)
 }
 
 fn coerce_integer(name: &str, value: &RawValue<'_>) -> AppResult<i64> {
@@ -267,9 +300,6 @@ fn coerce_float(name: &str, value: &RawValue<'_>) -> AppResult<f64> {
 
 fn coerce_str<'a>(name: &str, value: &'a RawValue<'_>) -> AppResult<&'a str> {
     match value {
-        RawValue::Str(s) if s.trim().is_empty() => Err(AppError::Ingestion(format!(
-            "column {name:?}: empty string values are not supported"
-        ))),
         RawValue::Str(s) => Ok(s),
         other => Err(AppError::Ingestion(format!(
             "column {name:?}: expected string, got {}",
@@ -402,10 +432,39 @@ mod tests {
     }
 
     #[test]
-    fn push_row_rejects_null() {
-        let cfg = mk_cfg(&[("a", ColumnType::Integer)]);
+    fn push_row_accepts_null_and_empty() {
+        let cfg = mk_cfg(&[
+            ("a", ColumnType::Integer),
+            ("b", ColumnType::String),
+            ("c", ColumnType::Float),
+        ]);
         let mut store = ColumnStore::new(&cfg);
-        let err = store.push_row(&[RawValue::Null]).unwrap_err();
-        assert!(err.to_string().contains("NULL"));
+        // Row 0: all null / empty
+        store.push_row(&[RawValue::Null, RawValue::Str(""), RawValue::Str("  ")]).unwrap();
+        assert_eq!(store.row_count(), 1);
+        assert!(store.null_rows_for("a").map_or(false, |n| n.contains(0)));
+        assert!(store.null_rows_for("b").map_or(false, |n| n.contains(0)));
+        assert!(store.null_rows_for("c").map_or(false, |n| n.contains(0)));
+        // Row 1: real values — not in null bitmaps
+        store.push_row(&[RawValue::Integer(42), RawValue::Str("DE"), RawValue::Float(1.5)]).unwrap();
+        assert!(!store.null_rows_for("a").map_or(false, |n| n.contains(1)));
+    }
+
+    #[test]
+    fn null_rows_excluded_from_aggregation() {
+        // BTreeMap order: amount, flag
+        let cfg = mk_cfg(&[("amount", ColumnType::Float), ("flag", ColumnType::Integer)]);
+        let mut store = ColumnStore::new(&cfg);
+        store.push_row(&[RawValue::Float(10.0), RawValue::Integer(1)]).unwrap();
+        store.push_row(&[RawValue::Null, RawValue::Integer(2)]).unwrap(); // null amount
+        store.push_row(&[RawValue::Float(30.0), RawValue::Integer(3)]).unwrap();
+        assert_eq!(store.row_count(), 3);
+        // The null bitmap for "amount" must contain only row 1
+        let nulls = store.null_rows_for("amount").unwrap();
+        assert!(nulls.contains(1));
+        assert!(!nulls.contains(0));
+        assert!(!nulls.contains(2));
+        // "flag" has no nulls
+        assert!(store.null_rows_for("flag").is_none());
     }
 }

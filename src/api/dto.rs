@@ -76,6 +76,9 @@ pub struct QueryResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ColumnStatsDto {
+    /// Number of matched rows with a non-null value for this column. May be less than
+    /// `matched_rows` when the column contains missing values.
+    pub count: u64,
     /// Present for numeric columns only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sum: Option<f64>,
@@ -191,6 +194,7 @@ impl From<Response> for QueryResponse {
                 let kind = r.column_types.get(&name).copied().unwrap_or(ColumnKind::Numeric);
                 let dto = match kind {
                     ColumnKind::DateTime => ColumnStatsDto {
+                        count: stats.count,
                         sum: None,
                         min: None,
                         max: None,
@@ -198,6 +202,7 @@ impl From<Response> for QueryResponse {
                         newest: (stats.count > 0).then(|| epoch_to_rfc3339(stats.max)),
                     },
                     ColumnKind::Numeric => ColumnStatsDto {
+                        count: stats.count,
                         sum: Some(stats.sum),
                         min: (stats.count > 0).then_some(stats.min),
                         max: (stats.count > 0).then_some(stats.max),

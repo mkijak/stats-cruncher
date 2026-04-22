@@ -96,6 +96,10 @@ fn evaluate_filter(query: &Query, store: &ColumnStore, rows: Range<usize>) -> Ro
             }),
             _ => return RoaringBitmap::new(),
         }
+        // Null rows hold dummy values that must not match any range
+        if let Some(nulls) = store.null_rows_for(name) {
+            bitmap -= nulls;
+        }
         if bitmap.is_empty() {
             return bitmap;
         }
@@ -141,10 +145,11 @@ fn aggregate(matched: &RoaringBitmap, store: &ColumnStore) -> PartialResult {
     };
     for name in store.column_names() {
         let Some(col) = store.column(name) else { continue };
+        let nulls = store.null_rows_for(name);
         let stats = match col {
-            Column::Integer(v) => fold(matched, |row| v[row] as f64),
-            Column::Float(v) => fold(matched, |row| v[row]),
-            Column::DateTime(v) => fold(matched, |row| v[row] as f64),
+            Column::Integer(v) => fold(matched, |row| v[row] as f64, nulls),
+            Column::Float(v) => fold(matched, |row| v[row], nulls),
+            Column::DateTime(v) => fold(matched, |row| v[row] as f64, nulls),
             Column::String(_) => continue,
         };
         partial.numeric.insert(name.clone(), stats);
@@ -152,9 +157,16 @@ fn aggregate(matched: &RoaringBitmap, store: &ColumnStore) -> PartialResult {
     partial
 }
 
-fn fold<F: Fn(usize) -> f64>(matched: &RoaringBitmap, value_at: F) -> NumericStats {
+fn fold<F: Fn(usize) -> f64>(
+    matched: &RoaringBitmap,
+    value_at: F,
+    nulls: Option<&RoaringBitmap>,
+) -> NumericStats {
     let mut s = NumericStats::empty();
     for row in matched.iter() {
+        if nulls.map_or(false, |n| n.contains(row)) {
+            continue;
+        }
         s.observe(value_at(row as usize));
     }
     s
@@ -306,5 +318,70 @@ mod tests {
         let partial = run_query(&store, mk_query(&[("country", &["US"])], &[], &[]));
         assert_eq!(partial.matched_rows, 0);
         assert_eq!(partial.numeric.get("amount").unwrap().count, 0);
+    }
+
+    fn mk_store_with_nulls() -> ColumnStore {
+        // Column order after BTreeMap sort: amount, country, user_id.
+        let cfg = mk_cfg();
+        let mut store = ColumnStore::new(&cfg);
+        let rows: &[(Option<f64>, Option<&str>, i64)] = &[
+            (Some(10.0), Some("DE"), 1),
+            (Some(20.0), Some("PL"), 2),
+            (None,       Some("FR"), 3), // null amount
+            (Some(40.0), None,       4), // null country
+            (Some(50.0), Some("PL"), 5),
+        ];
+        for (a, c, u) in rows {
+            store.push_row(&[
+                a.map_or(RawValue::Null, RawValue::Float),
+                c.map_or(RawValue::Null, RawValue::Str),
+                RawValue::Integer(*u),
+            ]).unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn null_rows_excluded_from_range_filter() {
+        let store = mk_store_with_nulls();
+        // amount >= 0 would match the dummy 0.0 for the null row if not explicitly excluded
+        let q = mk_query(
+            &[],
+            &[],
+            &[("amount", Some(NumericBound { value: 0.0, comparison: Comparison::Gte }), None)],
+        );
+        let partial = run_query(&store, q);
+        // Rows 0,1,3,4 match (amounts 10,20,40,50); row 2 is null → excluded
+        assert_eq!(partial.matched_rows, 4);
+        assert_eq!(partial.numeric.get("amount").unwrap().sum, 120.0);
+    }
+
+    #[test]
+    fn null_rows_excluded_from_aggregation() {
+        let store = mk_store_with_nulls();
+        // No filter — all 5 rows match. Row 2 has no amount value so it contributes
+        // to matched_rows but not to amount stats (count=4, not 5).
+        let partial = run_query(&store, mk_query(&[], &[], &[]));
+        assert_eq!(partial.matched_rows, 5);
+        let amount = partial.numeric.get("amount").unwrap();
+        assert_eq!(amount.count, 4);
+        assert_eq!(amount.sum, 120.0);
+    }
+
+    #[test]
+    fn null_country_passes_must_not_filter() {
+        let store = mk_store_with_nulls();
+        // must_not [country = "FR"] — row 3 (null country) has no value, certainly not "FR"
+        let partial = run_query(&store, mk_query(&[], &[("country", &["FR"])], &[]));
+        // Row 2 (FR) excluded; row 3 (null country) survives
+        assert_eq!(partial.matched_rows, 4);
+    }
+
+    #[test]
+    fn null_country_excluded_from_must_filter() {
+        let store = mk_store_with_nulls();
+        // must [country = "PL", "FR", "DE"] — row 3 (null country) has no value → excluded
+        let partial = run_query(&store, mk_query(&[("country", &["PL", "FR", "DE"])], &[], &[]));
+        assert_eq!(partial.matched_rows, 4);
     }
 }

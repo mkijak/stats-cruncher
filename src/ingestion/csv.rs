@@ -190,6 +190,26 @@ mod tests {
     }
 
     #[test]
+    fn empty_cells_treated_as_null() {
+        // Row with empty amount and country — should ingest successfully as null values
+        let tmp = tmp("nulls.csv");
+        {
+            let mut f = File::create(&tmp).unwrap();
+            writeln!(f, "{CSV_HEADER}").unwrap();
+            writeln!(f, "1001,99.50,DE,purchase,2026-01-01T00:00:00Z").unwrap();
+            writeln!(f, "1002,,  ,purchase,2026-01-02T00:00:00Z").unwrap(); // empty amount, whitespace country
+        }
+        let cfg = cfg_for(tmp.clone(), false);
+        let mut store = ColumnStore::new(&cfg);
+        CsvIngestor::new(cfg).ingest(&mut store).unwrap();
+        assert_eq!(store.row_count(), 2);
+        assert!(store.null_rows_for("amount").map_or(false, |n| n.contains(1)));
+        assert!(store.null_rows_for("country").map_or(false, |n| n.contains(1)));
+        assert!(store.null_rows_for("amount").map_or(false, |n| !n.contains(0)));
+        std::fs::remove_file(tmp).ok();
+    }
+
+    #[test]
     fn errors_on_missing_column() {
         let tmp = tmp("missing.csv");
         {

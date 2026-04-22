@@ -111,15 +111,15 @@ mod tests {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch("
             CREATE TABLE events (
-                user_id    INTEGER NOT NULL,
-                amount     REAL    NOT NULL,
-                country    TEXT    NOT NULL,
-                event_type TEXT    NOT NULL,
-                occurred_at TEXT   NOT NULL
+                user_id     INTEGER NOT NULL,
+                amount      REAL,
+                country     TEXT,
+                event_type  TEXT    NOT NULL,
+                occurred_at TEXT    NOT NULL
             );
-            INSERT INTO events VALUES (1001, 99.50, 'DE', 'purchase', '2026-01-01T00:00:00Z');
-            INSERT INTO events VALUES (1002, 149.00, 'PL', 'purchase', '2026-01-02T00:00:00Z');
-            INSERT INTO events VALUES (1003, 49.99,  'FR', 'refund',   '2026-01-03T00:00:00Z');
+            INSERT INTO events VALUES (1001, 99.50,  'DE', 'purchase', '2026-01-01T00:00:00Z');
+            INSERT INTO events VALUES (1002, NULL,   'PL', 'purchase', '2026-01-02T00:00:00Z');
+            INSERT INTO events VALUES (1003, 49.99,  NULL, 'refund',   '2026-01-03T00:00:00Z');
         ").unwrap();
     }
 
@@ -151,6 +151,10 @@ mod tests {
         let mut store = ColumnStore::new(&cfg);
         SqliteIngestor::new(cfg).ingest(&mut store).unwrap();
         assert_eq!(store.row_count(), 3);
+        // Row 1 has NULL amount, row 2 has NULL country
+        assert!(store.null_rows_for("amount").map_or(false, |n| n.contains(1)));
+        assert!(store.null_rows_for("country").map_or(false, |n| n.contains(2)));
+        assert!(store.null_rows_for("amount").map_or(false, |n| !n.contains(0)));
         assert!(matches!(store.column("country"), Some(Column::String(_))));
         let Column::DateTime(ts) = store.column("occurred_at").unwrap() else {
             panic!("wrong column kind")

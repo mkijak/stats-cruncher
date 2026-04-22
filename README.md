@@ -75,7 +75,7 @@ type   = "integer"
 hidden = true
 ```
 
-> **NULL and empty values are fatal.** Any `NULL` (SQLite) or empty / whitespace-only string (CSV) encountered in a declared column will abort ingestion with an error. Clean your source data before loading, or filter nulls out at the SQLite query level if needed.
+> **NULL and empty values are allowed.** A row is only affected in the context of that specific column: it never matches a `must` or range filter on the null column, always passes a `must_not` filter on it (no value is certainly not the excluded value). It will be still included in results if `must` filters do not mention its empty columns.
 
 ## HTTP API
 
@@ -142,16 +142,17 @@ The API requires full RFC3339 timestamps — bare dates like `2026-04-19` are no
 {
   "matched_rows": 299682,
   "numeric": {
-    "amount":      { "sum": 52468821.52, "min": 50.0,  "max": 300.0 },
-    "occurred_at": { "oldest": "2025-04-05T06:01:14Z", "newest": "2026-01-01T00:05:51Z" }
+    "amount":      { "count": 299100, "sum": 52468821.52, "min": 50.0,  "max": 300.0 },
+    "occurred_at": { "count": 299682, "oldest": "2025-04-05T06:01:14Z", "newest": "2026-01-01T00:05:51Z" }
   }
 }
 ```
 
 * **`matched_rows`**: Total rows satisfying all filter clauses.
 * **`numeric`**: Per-column aggregates for every non-hidden numeric and date-time column.
-  * Numeric columns (`integer`, `float`) report `sum`, `min`, and `max`.
-  * Date-time columns report `oldest` and `newest` as RFC3339 strings.
+  * **`count`**: Number of matched rows with a non-null value for this column. May be less than `matched_rows` when the column contains missing values.
+  * Numeric columns (`integer`, `float`) additionally report `sum`, `min`, and `max`.
+  * Date-time columns additionally report `oldest` and `newest` as RFC3339 strings.
   * Columns declared `hidden = true` in the config are omitted entirely.
 
 ## Adding a new data source
@@ -167,7 +168,7 @@ pub trait Ingestor {
 To add a new source format:
 
 1. **Add a variant to `SourceConfig`** in `src/config/schema.rs` with whatever connection parameters the source needs (path, URL, table name, etc.).
-2. **Create `src/ingestion/<format>.rs`** implementing `Ingestor`. Stream rows one at a time and push each via `store.push_row()`. The store coerces values into the declared column type, but the ingestor must provide them in a coercible form — passing everything as strings is fine as long as the strings are valid for the target type: a decimal integer or float string for numeric columns, a non-empty string for string columns, and an RFC3339 timestamp (e.g. `2026-04-19T00:00:00Z`) for date-time columns. 
+2. **Create `src/ingestion/<format>.rs`** implementing `Ingestor`. Stream rows one at a time and push each via `store.push_row()`. The store coerces values into the declared column type, but the ingestor must provide them in a coercible form — passing everything as strings is fine as long as the strings are valid for the target type: a decimal integer or float string for numeric columns, a non-empty string for string columns, and an RFC3339 timestamp (e.g. `2026-04-19T00:00:00Z`) for date-time columns. Pass `RawValue::Null` or an empty/whitespace string to represent a missing value for any type.
 3. **Call** `resource::check_memory(limit)` every `cfg.engine.chunk_size_rows` rows to respect the memory cap and fail fast on runaway ingestion.
 3. **Register the variant** in the `select()` match in `src/ingestion.rs`.
 
