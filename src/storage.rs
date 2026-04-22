@@ -305,7 +305,7 @@ mod tests {
     fn mk_cfg(cols: &[(&str, ColumnType)]) -> AppConfig {
         let mut searchable = BTreeMap::new();
         for (n, t) in cols {
-            searchable.insert((*n).to_string(), SearchableColumn { column_type: *t });
+            searchable.insert((*n).to_string(), SearchableColumn { column_type: *t, hidden: false });
         }
         AppConfig {
             source: SourceConfig::Csv {

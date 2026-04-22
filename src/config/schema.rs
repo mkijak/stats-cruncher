@@ -49,6 +49,9 @@ pub struct ApiConfig {
 pub struct SearchableColumn {
     #[serde(rename = "type")]
     pub column_type: ColumnType,
+    /// When `true`, the column is indexed and filterable but excluded from query responses.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]

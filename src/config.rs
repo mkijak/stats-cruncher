@@ -10,9 +10,11 @@ pub fn load(path: &Path) -> AppResult<AppConfig> {
     let raw = std::fs::read_to_string(path).map_err(|e| {
         AppError::Config(format!("cannot read config {}: {e}", path.display()))
     })?;
-    toml::from_str(&raw).map_err(|e| {
-        AppError::Config(format!("parsing config {}: {e}", path.display()))
-    })
+    parse(&raw)
+}
+
+pub fn parse(raw: &str) -> AppResult<AppConfig> {
+    toml::from_str(raw).map_err(|e| AppError::Config(format!("parsing config: {e}")))
 }
 
 #[cfg(test)]
@@ -20,16 +22,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loads_example_config() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("config.example.toml");
-        let cfg = load(&path).unwrap();
+    fn parses_full_config() {
+        let cfg = parse(r#"
+            partition_column = "occurred_at"
+
+            [source]
+            type = "csv"
+            path = "/data/events.csv.gz"
+            gzip = true
+
+            [engine]
+            memory_limit = "8GiB"
+            chunk_size_rows = 65_536
+            worker_threads = 4
+
+            [api]
+            bind = "0.0.0.0:8080"
+
+            [searchable.user_id]
+            type = "integer"
+            hidden = true
+
+            [searchable.amount]
+            type = "float"
+
+            [searchable.country]
+            type = "string"
+
+            [searchable.occurred_at]
+            type = "date-time"
+        "#).unwrap();
         assert_eq!(cfg.engine.memory_limit, 8 * 1024u64.pow(3));
         assert_eq!(cfg.engine.chunk_size_rows, 65_536);
-        assert_eq!(cfg.engine.worker_threads, 8);
+        assert_eq!(cfg.engine.worker_threads, 4);
         assert_eq!(cfg.api.bind, "0.0.0.0:8080");
         assert!(matches!(cfg.source, SourceConfig::Csv { gzip: true, .. }));
-        assert!(cfg.searchable.contains_key("occurred_at"));
+        assert!(cfg.searchable["user_id"].hidden);
+        assert!(!cfg.searchable["amount"].hidden);
+        assert!(matches!(cfg.searchable["occurred_at"].column_type, ColumnType::DateTime));
+        assert_eq!(cfg.partition_column.as_deref(), Some("occurred_at"));
+    }
+
+    #[test]
+    fn hidden_defaults_to_false() {
+        let cfg = parse(r#"
+            [source]
+            type = "csv"
+            path = "/data/events.csv"
+            gzip = false
+
+            [engine]
+            memory_limit = 1024
+            chunk_size_rows = 100
+            worker_threads = 1
+
+            [api]
+            bind = "0.0.0.0:8080"
+
+            [searchable.amount]
+            type = "float"
+        "#).unwrap();
+        assert!(!cfg.searchable["amount"].hidden);
     }
 
     #[test]
@@ -40,16 +93,7 @@ mod tests {
 
     #[test]
     fn malformed_toml_is_config_error() {
-        let dir = tempdir();
-        let path = dir.join("broken.toml");
-        std::fs::write(&path, "this is = not [valid toml").unwrap();
-        let err = load(&path).unwrap_err();
+        let err = parse("this is = not [valid toml").unwrap_err();
         assert!(matches!(err, AppError::Config(_)));
-    }
-
-    fn tempdir() -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("stats-cruncher-config-{}", std::process::id()));
-        std::fs::create_dir_all(&p).unwrap();
-        p
     }
 }

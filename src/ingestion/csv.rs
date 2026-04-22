@@ -124,61 +124,74 @@ mod tests {
     use super::*;
     use crate::config::{ApiConfig, ColumnType, EngineConfig, SearchableColumn};
     use crate::storage::Column;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::collections::BTreeMap;
     use std::io::Write;
     use std::path::PathBuf;
 
+    const CSV_HEADER: &str = "user_id,amount,country,event_type,occurred_at";
+    const CSV_ROWS: &str = "\
+1001,99.50,DE,purchase,2026-01-01T00:00:00Z
+1002,149.00,PL,purchase,2026-01-02T00:00:00Z
+1003,49.99,FR,refund,2026-01-03T00:00:00Z";
+
     fn cfg_for(path: PathBuf, gzip: bool) -> AppConfig {
         let mut searchable = BTreeMap::new();
-        searchable.insert("user_id".into(), SearchableColumn { column_type: ColumnType::Integer });
-        searchable.insert("amount".into(), SearchableColumn { column_type: ColumnType::Float });
-        searchable.insert("country".into(), SearchableColumn { column_type: ColumnType::String });
-        searchable.insert(
-            "event_type".into(),
-            SearchableColumn { column_type: ColumnType::String },
-        );
-        searchable.insert(
-            "occurred_at".into(),
-            SearchableColumn { column_type: ColumnType::DateTime },
-        );
+        searchable.insert("user_id".into(), SearchableColumn { column_type: ColumnType::Integer, hidden: false });
+        searchable.insert("amount".into(), SearchableColumn { column_type: ColumnType::Float, hidden: false });
+        searchable.insert("country".into(), SearchableColumn { column_type: ColumnType::String, hidden: false });
+        searchable.insert("event_type".into(), SearchableColumn { column_type: ColumnType::String, hidden: false });
+        searchable.insert("occurred_at".into(), SearchableColumn { column_type: ColumnType::DateTime, hidden: false });
         AppConfig {
             source: SourceConfig::Csv { path, delimiter: None, gzip },
-            engine: EngineConfig {
-                memory_limit: u64::MAX,
-                chunk_size_rows: 1024,
-                worker_threads: 1,
-            },
+            engine: EngineConfig { memory_limit: u64::MAX, chunk_size_rows: 1024, worker_threads: 1 },
             api: ApiConfig { bind: "0.0.0.0:0".into() },
             searchable,
             partition_column: None,
         }
     }
 
-    fn fixture_path(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data").join(name)
+    fn tmp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("stats_cruncher_{name}_{}", std::process::id()))
     }
 
     #[test]
-    fn ingests_plain_csv_fixture() {
-        let cfg = cfg_for(fixture_path("events.csv"), false);
+    fn ingests_plain_csv() {
+        let tmp = tmp("plain.csv");
+        {
+            let mut f = File::create(&tmp).unwrap();
+            writeln!(f, "{CSV_HEADER}").unwrap();
+            write!(f, "{CSV_ROWS}").unwrap();
+        }
+        let cfg = cfg_for(tmp.clone(), false);
         let mut store = ColumnStore::new(&cfg);
         CsvIngestor::new(cfg).ingest(&mut store).unwrap();
-        assert_eq!(store.row_count(), 100);
+        assert_eq!(store.row_count(), 3);
         assert!(matches!(store.column("country"), Some(Column::String(_))));
         assert!(matches!(store.column("occurred_at"), Some(Column::DateTime(_))));
+        std::fs::remove_file(tmp).ok();
     }
 
     #[test]
-    fn ingests_gzipped_csv_fixture() {
-        let cfg = cfg_for(fixture_path("events.csv.gz"), true);
+    fn ingests_gzipped_csv() {
+        let tmp = tmp("gzip.csv.gz");
+        {
+            let f = File::create(&tmp).unwrap();
+            let mut gz = GzEncoder::new(f, Compression::default());
+            writeln!(gz, "{CSV_HEADER}").unwrap();
+            write!(gz, "{CSV_ROWS}").unwrap();
+        }
+        let cfg = cfg_for(tmp.clone(), true);
         let mut store = ColumnStore::new(&cfg);
         CsvIngestor::new(cfg).ingest(&mut store).unwrap();
-        assert_eq!(store.row_count(), 100);
+        assert_eq!(store.row_count(), 3);
+        std::fs::remove_file(tmp).ok();
     }
 
     #[test]
     fn errors_on_missing_column() {
-        let tmp = std::env::temp_dir().join("stats_cruncher_csv_missing.csv");
+        let tmp = tmp("missing.csv");
         {
             let mut f = File::create(&tmp).unwrap();
             writeln!(f, "user_id,amount,country,event_type").unwrap();

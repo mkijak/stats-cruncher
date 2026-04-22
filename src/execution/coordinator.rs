@@ -6,12 +6,12 @@ use std::thread;
 
 use tokio::sync::oneshot;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ColumnType};
 use crate::error::{AppError, AppResult};
 use crate::execution::aggregator::{Aggregator, PartialResult};
 use crate::execution::chunk::{ChunkId, Task};
 use crate::execution::worker::Worker;
-use crate::query::{Comparison, Query, QueryId, RangeFilter, Response};
+use crate::query::{ColumnKind, Comparison, Query, QueryId, RangeFilter, Response};
 use crate::resource;
 use crate::storage::{Column, ColumnStore};
 
@@ -97,7 +97,20 @@ impl Coordinator {
         resource::check_memory(self.cfg.engine.memory_limit)?;
         let (tx, rx) = oneshot::channel::<AppResult<Response>>();
         self.enqueue(query, tx)?;
-        rx.await.expect("coordinator dropped before responding")
+        let mut response = rx.await.expect("coordinator dropped before responding")?;
+        for (name, col) in &self.cfg.searchable {
+            if col.hidden {
+                response.numeric.remove(name.as_str());
+            } else if response.numeric.contains_key(name.as_str()) {
+                let kind = if matches!(col.column_type, ColumnType::DateTime) {
+                    ColumnKind::DateTime
+                } else {
+                    ColumnKind::Numeric
+                };
+                response.column_types.insert(name.clone(), kind);
+            }
+        }
+        Ok(response)
     }
 
     fn enqueue(

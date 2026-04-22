@@ -137,6 +137,7 @@ fn aggregate(matched: &RoaringBitmap, store: &ColumnStore) -> PartialResult {
     let mut partial = PartialResult {
         matched_rows: matched.len(),
         numeric: Default::default(),
+        column_types: Default::default(),
     };
     for name in store.column_names() {
         let Some(col) = store.column(name) else { continue };
@@ -170,9 +171,9 @@ mod tests {
 
     fn mk_cfg() -> crate::config::AppConfig {
         let mut searchable = BTreeMap::new();
-        searchable.insert("amount".into(), SearchableColumn { column_type: ColumnType::Float });
-        searchable.insert("country".into(), SearchableColumn { column_type: ColumnType::String });
-        searchable.insert("user_id".into(), SearchableColumn { column_type: ColumnType::Integer });
+        searchable.insert("amount".into(), SearchableColumn { column_type: ColumnType::Float, hidden: false });
+        searchable.insert("country".into(), SearchableColumn { column_type: ColumnType::String, hidden: false });
+        searchable.insert("user_id".into(), SearchableColumn { column_type: ColumnType::Integer, hidden: false });
         crate::config::AppConfig {
             source: SourceConfig::Csv {
                 path: PathBuf::from("/dev/null"),

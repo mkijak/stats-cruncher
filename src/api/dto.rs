@@ -1,13 +1,12 @@
 use std::collections::BTreeMap;
 
-use chrono::DateTime;
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::query::{
-    Comparison, Must, MustNot, NumericBound, Query, RangeFilter, Response, StringMatch,
+    ColumnKind, Comparison, Must, MustNot, NumericBound, Query, RangeFilter, Response, StringMatch,
 };
-use crate::query::NumericStats;
 
 /// Query request body.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -70,30 +69,28 @@ impl TryFrom<BoundValue> for f64 {
 pub struct QueryResponse {
     /// Total number of rows in the store matching the filter.
     pub matched_rows: u64,
-    /// Per-column stats. Only numeric and date-time columns are summarised.
-    /// Date-time columns report seconds-since-epoch UTC.
-    pub numeric: BTreeMap<String, NumericStatsDto>,
+    /// Per-column stats. Numeric columns include `sum`/`min`/`max`.
+    /// Date-time columns include `oldest`/`newest` as RFC3339 strings instead.
+    pub numeric: BTreeMap<String, ColumnStatsDto>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct NumericStatsDto {
-    pub count: u64,
-    pub sum: f64,
-    /// `None` when no rows matched (otherwise the minimum observed value).
+pub struct ColumnStatsDto {
+    /// Present for numeric columns only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sum: Option<f64>,
+    /// Present for numeric columns only.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub min: Option<f64>,
-    /// `None` when no rows matched (otherwise the maximum observed value).
+    /// Present for numeric columns only.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
-}
-
-impl From<NumericStats> for NumericStatsDto {
-    fn from(s: NumericStats) -> Self {
-        let (min, max) = if s.count == 0 {
-            (None, None)
-        } else {
-            (Some(s.min), Some(s.max))
-        };
-        Self { count: s.count, sum: s.sum, min, max }
-    }
+    /// Present for date-time columns only. RFC3339 timestamp of the earliest matched row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest: Option<String>,
+    /// Present for date-time columns only. RFC3339 timestamp of the latest matched row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest: Option<String>,
 }
 
 /// Response body for GET /status.
@@ -187,9 +184,37 @@ impl TryFrom<RangeDto> for RangeFilter {
 
 impl From<Response> for QueryResponse {
     fn from(r: Response) -> Self {
-        Self {
-            matched_rows: r.matched_rows,
-            numeric: r.numeric.into_iter().map(|(k, v)| (k, v.into())).collect(),
-        }
+        let numeric = r
+            .numeric
+            .into_iter()
+            .map(|(name, stats)| {
+                let kind = r.column_types.get(&name).copied().unwrap_or(ColumnKind::Numeric);
+                let dto = match kind {
+                    ColumnKind::DateTime => ColumnStatsDto {
+                        sum: None,
+                        min: None,
+                        max: None,
+                        oldest: (stats.count > 0).then(|| epoch_to_rfc3339(stats.min)),
+                        newest: (stats.count > 0).then(|| epoch_to_rfc3339(stats.max)),
+                    },
+                    ColumnKind::Numeric => ColumnStatsDto {
+                        sum: Some(stats.sum),
+                        min: (stats.count > 0).then_some(stats.min),
+                        max: (stats.count > 0).then_some(stats.max),
+                        oldest: None,
+                        newest: None,
+                    },
+                };
+                (name, dto)
+            })
+            .collect();
+        Self { matched_rows: r.matched_rows, numeric }
     }
+}
+
+fn epoch_to_rfc3339(epoch_secs: f64) -> String {
+    Utc.timestamp_opt(epoch_secs as i64, 0)
+        .single()
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| epoch_secs.to_string())
 }

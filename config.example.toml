@@ -59,9 +59,15 @@ bind = "0.0.0.0:8080"
 #   string    — dictionary-encoded; supports must / must_not filters
 #   date-time — RFC3339 on the wire (e.g. "2026-04-19T00:00:00Z"); stored
 #               internally as epoch-seconds UTC; supports range filters
+#
+# Optional flags:
+#   hidden = true  — column is indexed and filterable but omitted from query
+#                    responses; useful for ID or dimension columns that only
+#                    make sense as filters, not as reported metrics
 
 [searchable.user_id]
 type = "integer"
+hidden = true
 
 [searchable.amount]
 type = "float"

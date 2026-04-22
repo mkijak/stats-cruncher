@@ -1,6 +1,6 @@
 mod model;
 
 pub use model::{
-    Comparison, Must, MustNot, NumericBound, NumericStats, Query, QueryId, RangeFilter, Response,
-    StringMatch,
+    ColumnKind, Comparison, Must, MustNot, NumericBound, NumericStats, Query, QueryId, RangeFilter,
+    Response, StringMatch,
 };

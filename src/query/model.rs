@@ -41,10 +41,17 @@ pub enum Comparison {
     Lte,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ColumnKind {
+    Numeric,
+    DateTime,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Response {
     pub matched_rows: u64,
     pub numeric: BTreeMap<String, NumericStats>,
+    pub column_types: BTreeMap<String, ColumnKind>,
 }
 
 #[derive(Debug, Clone, Copy)]

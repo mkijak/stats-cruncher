@@ -103,64 +103,75 @@ mod tests {
     use super::*;
     use crate::config::{ApiConfig, ColumnType, EngineConfig, SearchableColumn};
     use crate::storage::Column;
+    use rusqlite::Connection;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    fn make_db(path: &PathBuf) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("
+            CREATE TABLE events (
+                user_id    INTEGER NOT NULL,
+                amount     REAL    NOT NULL,
+                country    TEXT    NOT NULL,
+                event_type TEXT    NOT NULL,
+                occurred_at TEXT   NOT NULL
+            );
+            INSERT INTO events VALUES (1001, 99.50, 'DE', 'purchase', '2026-01-01T00:00:00Z');
+            INSERT INTO events VALUES (1002, 149.00, 'PL', 'purchase', '2026-01-02T00:00:00Z');
+            INSERT INTO events VALUES (1003, 49.99,  'FR', 'refund',   '2026-01-03T00:00:00Z');
+        ").unwrap();
+    }
+
+    fn tmp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("stats_cruncher_{name}_{}", std::process::id()))
+    }
+
     fn cfg_for(path: PathBuf, table: &str) -> AppConfig {
         let mut searchable = BTreeMap::new();
-        searchable.insert("user_id".into(), SearchableColumn { column_type: ColumnType::Integer });
-        searchable.insert("amount".into(), SearchableColumn { column_type: ColumnType::Float });
-        searchable.insert("country".into(), SearchableColumn { column_type: ColumnType::String });
-        searchable.insert(
-            "event_type".into(),
-            SearchableColumn { column_type: ColumnType::String },
-        );
-        searchable.insert(
-            "occurred_at".into(),
-            SearchableColumn { column_type: ColumnType::DateTime },
-        );
+        searchable.insert("user_id".into(), SearchableColumn { column_type: ColumnType::Integer, hidden: false });
+        searchable.insert("amount".into(), SearchableColumn { column_type: ColumnType::Float, hidden: false });
+        searchable.insert("country".into(), SearchableColumn { column_type: ColumnType::String, hidden: false });
+        searchable.insert("event_type".into(), SearchableColumn { column_type: ColumnType::String, hidden: false });
+        searchable.insert("occurred_at".into(), SearchableColumn { column_type: ColumnType::DateTime, hidden: false });
         AppConfig {
             source: SourceConfig::Sqlite { path, table: table.into() },
-            engine: EngineConfig {
-                memory_limit: u64::MAX,
-                chunk_size_rows: 1024,
-                worker_threads: 1,
-            },
+            engine: EngineConfig { memory_limit: u64::MAX, chunk_size_rows: 1024, worker_threads: 1 },
             api: ApiConfig { bind: "0.0.0.0:0".into() },
             searchable,
             partition_column: None,
         }
     }
 
-    fn fixture_db() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test_data")
-            .join("events.db")
-    }
-
     #[test]
-    fn ingests_sqlite_fixture() {
-        let cfg = cfg_for(fixture_db(), "events");
+    fn ingests_sqlite() {
+        let tmp = tmp("events.db");
+        make_db(&tmp);
+        let cfg = cfg_for(tmp.clone(), "events");
         let mut store = ColumnStore::new(&cfg);
         SqliteIngestor::new(cfg).ingest(&mut store).unwrap();
-        assert_eq!(store.row_count(), 100);
+        assert_eq!(store.row_count(), 3);
         assert!(matches!(store.column("country"), Some(Column::String(_))));
         let Column::DateTime(ts) = store.column("occurred_at").unwrap() else {
             panic!("wrong column kind")
         };
-        assert_eq!(ts.len(), 100);
+        assert_eq!(ts.len(), 3);
         let Column::Integer(uid) = store.column("user_id").unwrap() else {
             panic!("wrong column kind")
         };
         assert!(uid.iter().all(|&v| (1000..=1030).contains(&v)));
+        std::fs::remove_file(tmp).ok();
     }
 
     #[test]
     fn errors_on_missing_table() {
-        let cfg = cfg_for(fixture_db(), "does_not_exist");
+        let tmp = tmp("empty.db");
+        Connection::open(&tmp).unwrap(); // create empty db
+        let cfg = cfg_for(tmp.clone(), "does_not_exist");
         let mut store = ColumnStore::new(&cfg);
         let err = SqliteIngestor::new(cfg).ingest(&mut store).unwrap_err();
         assert!(err.to_string().to_lowercase().contains("does_not_exist"));
+        std::fs::remove_file(tmp).ok();
     }
 
     #[test]

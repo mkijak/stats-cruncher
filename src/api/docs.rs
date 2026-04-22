@@ -1,7 +1,7 @@
 use utoipa::OpenApi;
 
 use crate::api::dto::{
-    ErrorResponse, NumericStatsDto, QueryRequest, QueryResponse, RangeDto, StatusResponse,
+    ColumnStatsDto, ErrorResponse, QueryRequest, QueryResponse, RangeDto, StatusResponse,
     WindowCounts,
 };
 
@@ -20,7 +20,7 @@ use crate::api::dto::{
         QueryRequest,
         RangeDto,
         QueryResponse,
-        NumericStatsDto,
+        ColumnStatsDto,
         ErrorResponse,
     )),
     info(

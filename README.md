@@ -67,6 +67,14 @@ Each entry maps a column to a logical type:
 
 You may declare any number of date-time columns (`created_at`, `updated_at`, etc.). Clients specify which column to evaluate at query time.
 
+An optional `hidden = true` flag marks a column as filter-only: it is fully indexed and can appear in any filter clause, but is excluded from the `numeric` block of query responses. Use this for ID or dimension columns where aggregated stats (min/max/sum) are meaningless.
+
+```toml
+[searchable.user_id]
+type   = "integer"
+hidden = true
+```
+
 > **NULL and empty values are fatal.** Any `NULL` (SQLite) or empty / whitespace-only string (CSV) encountered in a declared column will abort ingestion with an error. Clean your source data before loading, or filter nulls out at the SQLite query level if needed.
 
 ## HTTP API
@@ -130,7 +138,21 @@ The API requires full RFC3339 timestamps — bare dates like `2026-04-19` are no
 
 #### Response
 
-*The response payload structure is currently undergoing finalization and will be documented here later.*
+```json
+{
+  "matched_rows": 299682,
+  "numeric": {
+    "amount":      { "sum": 52468821.52, "min": 50.0,  "max": 300.0 },
+    "occurred_at": { "oldest": "2025-04-05T06:01:14Z", "newest": "2026-01-01T00:05:51Z" }
+  }
+}
+```
+
+* **`matched_rows`**: Total rows satisfying all filter clauses.
+* **`numeric`**: Per-column aggregates for every non-hidden numeric and date-time column.
+  * Numeric columns (`integer`, `float`) report `sum`, `min`, and `max`.
+  * Date-time columns report `oldest` and `newest` as RFC3339 strings.
+  * Columns declared `hidden = true` in the config are omitted entirely.
 
 ## Adding a new data source
 
