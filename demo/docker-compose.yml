@@ -1,0 +1,25 @@
+services:
+  stats-cruncher-generate:
+    container_name: stats-cruncher-generate
+    image: python:3.12-alpine
+    volumes:
+      - data:/data
+      - ./generate.py:/generate.py:ro
+    command: python /generate.py /data/sample.csv
+
+  stats-cruncher:
+    container_name: stats-cruncher
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - data:/data
+      - ./config.toml:/config.toml:ro
+    depends_on:
+      stats-cruncher-generate:
+        condition: service_completed_successfully
+
+volumes:
+  data:
