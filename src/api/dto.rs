@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{FromRequest, Request};
+use axum::http::StatusCode;
 use chrono::{DateTime, TimeZone, Utc};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -8,8 +12,33 @@ use crate::query::{
     ColumnKind, Comparison, Must, MustNot, NumericBound, Query, RangeFilter, Response, StringMatch,
 };
 
+pub struct AppJson<T>(pub T);
+
+impl<T, S> FromRequest<S> for AppJson<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, axum::Json<ErrorResponse>);
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(v)) => Ok(AppJson(v)),
+            Err(rejection) => {
+                let status = match &rejection {
+                    JsonRejection::JsonSyntaxError(_) => StatusCode::BAD_REQUEST,
+                    JsonRejection::MissingJsonContentType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    _ => StatusCode::UNPROCESSABLE_ENTITY,
+                };
+                Err((status, axum::Json(ErrorResponse::new(rejection.body_text()))))
+            }
+        }
+    }
+}
+
 /// Query request body.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QueryRequest {
     /// An inclusion filter. For a given column, the row must match at least one of the provided exact values (Logical OR within the array). Multiple columns are intersected (Logical AND).
     #[serde(default)]
@@ -25,6 +54,7 @@ pub struct QueryRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RangeDto {
     pub eq: Option<BoundValue>,
     pub gt: Option<BoundValue>,

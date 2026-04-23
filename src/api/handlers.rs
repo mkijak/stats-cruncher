@@ -3,7 +3,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 
 use crate::api::AppState;
-use crate::api::dto::{ErrorResponse, QueryRequest, QueryResponse, StatusResponse, WindowCounts};
+use crate::api::dto::{AppJson, ErrorResponse, QueryRequest, QueryResponse, StatusResponse, WindowCounts};
 use crate::error::AppError;
 use crate::query::Query;
 
@@ -38,7 +38,7 @@ pub async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
 )]
 pub async fn query(
     State(state): State<AppState>,
-    Json(req): Json<QueryRequest>,
+    AppJson(req): AppJson<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let query = Query::try_from(req).map_err(|e| {
         state.metrics.record(true);
