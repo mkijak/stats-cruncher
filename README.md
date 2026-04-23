@@ -6,8 +6,6 @@ It is built for scenarios where the working dataset fits within system RAM.
 
 > **Important Note on Text Data:** This engine does not perform full-text search (no `LIKE`, `CONTAINS`, or regex). All `string` columns are effectively treated as **enumerations**. Under the hood, strings are dictionary-encoded and mapped to highly compressed bitsets (Roaring Bitmaps). This allows the engine to resolve queries using fast bitwise operations instead of scanning text. Because of this architecture, string fields are strictly for **exact-hit filtering**. Do not ingest high-cardinality, free-form text (like log messages or unique UUIDs), as it will completely defeat the efficiency of the bitmap indexes.
 
-> **Pre-release.** The engine is actively under development. The underlying query response payload format is not yet finalized.
-
 ## Quick start
 
 1. Compile the release binary:
