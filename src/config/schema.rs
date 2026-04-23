@@ -41,6 +41,10 @@ pub struct EngineConfig {
     /// When true, non-hidden string columns include a per-value hit count in query responses.
     #[serde(default)]
     pub string_value_counts: bool,
+    /// How often to check config and data files for changes and reload, in whole minutes.
+    /// When absent or zero, automatic reload is disabled.
+    #[serde(default)]
+    pub reload_interval_mins: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]

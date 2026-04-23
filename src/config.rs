@@ -86,6 +86,49 @@ mod tests {
     }
 
     #[test]
+    fn reload_interval_defaults_to_zero() {
+        let cfg = parse(r#"
+            [source]
+            type = "csv"
+            path = "/data/events.csv"
+
+            [engine]
+            memory_limit = 1024
+            chunk_size_rows = 100
+            worker_threads = 1
+
+            [api]
+            bind = "0.0.0.0:8080"
+
+            [searchable.amount]
+            type = "float"
+        "#).unwrap();
+        assert_eq!(cfg.engine.reload_interval_mins, 0);
+    }
+
+    #[test]
+    fn reload_interval_parses() {
+        let cfg = parse(r#"
+            [source]
+            type = "csv"
+            path = "/data/events.csv"
+
+            [engine]
+            memory_limit = 1024
+            chunk_size_rows = 100
+            worker_threads = 1
+            reload_interval_mins = 15
+
+            [api]
+            bind = "0.0.0.0:8080"
+
+            [searchable.amount]
+            type = "float"
+        "#).unwrap();
+        assert_eq!(cfg.engine.reload_interval_mins, 15);
+    }
+
+    #[test]
     fn missing_file_is_config_error() {
         let err = load(std::path::Path::new("/does/not/exist.toml")).unwrap_err();
         assert!(matches!(err, AppError::Config(_)));

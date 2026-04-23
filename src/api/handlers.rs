@@ -44,7 +44,7 @@ pub async fn query(
         state.metrics.record(true);
         (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(e)))
     })?;
-    match state.coordinator.submit(query).await {
+    match state.coordinator.load().submit(query).await {
         Ok(response) => {
             state.metrics.record(false);
             Ok(Json(response.into()))

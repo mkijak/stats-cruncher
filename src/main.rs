@@ -20,7 +20,7 @@ async fn main() -> Result<(), AppError> {
         tracing::error!(path = %cli.config.display(), error = %e, "failed to load config");
         e
     })?;
-    let app = App::bootstrap(cfg).await.map_err(|e| {
+    let app = App::bootstrap(cli.config.clone(), cfg).await.map_err(|e| {
         tracing::error!(error = %e, "failed to bootstrap app");
         e
     })?;

@@ -145,7 +145,7 @@ mod tests {
         searchable.insert("occurred_at".into(), SearchableColumn { column_type: ColumnType::DateTime, hidden: false });
         AppConfig {
             source: SourceConfig::Csv { path, delimiter: None, gzip },
-            engine: EngineConfig { memory_limit: u64::MAX, chunk_size_rows: 1024, worker_threads: 1, string_value_counts: false },
+            engine: EngineConfig { memory_limit: u64::MAX, chunk_size_rows: 1024, worker_threads: 1, string_value_counts: false, reload_interval_mins: 0 },
             api: ApiConfig { bind: "0.0.0.0:0".into() },
             searchable,
             partition_column: None,

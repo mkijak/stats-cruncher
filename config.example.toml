@@ -49,6 +49,10 @@ worker_threads = 2
 # count — cheap for low-cardinality enums, noticeable for high-cardinality ones.
 string_value_counts = false
 
+# How often to check config and data files for changes and do a hot-reload.
+# Value in minutes. When absent or zero, the automatic reload is disabled.
+reload_interval_mins = 0
+
 # --- api ----------------------------------------------------------------------
 # HTTP surface exposing /status and /query.
 

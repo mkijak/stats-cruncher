@@ -39,7 +39,7 @@ Defines the ingestion mechanism. The engine currently supports two formats, conf
 * **`csv`**: A flat file on disk. Accepts `path`, an optional `delimiter` (defaults to `,`), and a `gzip = true` flag for streaming decompression of `.gz` archives. The engine assumes the first row is the header.
 * **`sqlite`**: A SQLite database file. Accepts `path` and the target `table`.
 
-*Architecture Note:* Data is read strictly once at boot. Restart the service to ingest fresh data.
+*Architecture Note:* Data is read strictly once at boot. Restart the service to ingest fresh data, or enable automatic hot reload — see `reload_interval_mins` below.
 
 ### `[engine]`
 
@@ -48,6 +48,12 @@ Controls the concurrency model.
 * **`chunk_size_rows`**: Dictates the morsel size for parallel execution. This tunes the workload for CPU cache locality. Smaller values ensure fair scheduling across concurrent queries (preventing head-of-line blocking), while larger values reduce thread synchronization overhead. Leave at the default (`65_536`) unless profiling specific hardware.
 * **`worker_threads`**: The size of the dedicated compute pool used for query execution. This defines the number of physical CPU cores the application will dedicate to data crunching (note that asynchronous HTTP request handlers may cause total thread usage to slightly exceed this limit). In a heavy load scenarios leave at least 1-2 cores free for other processes.
 * **`string_value_counts`** When enabled, query responses include a per-value hit count for every string column (e.g., how many matched rows had country = "DE"). Cost scales with the number of distinct values per column, not with row count — cheap for low-cardinality enums, noticeable for high-cardinality ones.
+* **`reload_interval_mins`** *(optional)* When set to a non-zero integer, enables automatic hot reload. Every N minutes the engine checks the modification time of both the config file and the data file. If either has changed, it waits until writes have stopped (by confirming the modification time is stable across two consecutive checks, one minute apart) and then re-ingests the data and atomically swaps the in-memory store — in-flight queries complete against the old store uninterrupted. When absent or set to `0`, reload is disabled and the engine only reads data at startup.
+
+  A few things to be aware of:
+
+  * **No file validation.** The engine loads whatever it finds on a disk. If a write process is interrupted partway through, the resulting file will be read as-is. It is the responsibility of the data pipeline to ensure data are valid.
+  * **Transient resource spike.** During reload the new dataset is fully ingested into memory before the old one is released, so RAM usage temporarily doubles. CPU usage also rises as ingestion runs alongside live query processing.
 
 ### `[api]`
 

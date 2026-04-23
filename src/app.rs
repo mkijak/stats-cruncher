@@ -1,5 +1,7 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use tokio::net::TcpListener;
 use tokio::signal;
 
@@ -10,25 +12,32 @@ use crate::error::{AppError, AppResult};
 use crate::execution::Coordinator;
 use crate::ingestion;
 use crate::metrics::Metrics;
-use crate::storage::ColumnStore;
+use crate::reload;
 
 pub struct App {
+    config_path: PathBuf,
     cfg: AppConfig,
-    store: Arc<ColumnStore>,
     state: AppState,
 }
 
 impl App {
-    pub async fn bootstrap(cfg: AppConfig) -> AppResult<Self> {
+    pub async fn bootstrap(config_path: PathBuf, cfg: AppConfig) -> AppResult<Self> {
         let store = Arc::new(ingestion::run(&cfg).await?);
-        let coordinator = Arc::new(Coordinator::start(cfg.clone(), store.clone()));
-        let metrics = Arc::new(Metrics::new(store.row_count() as u64));
+        let rows = store.row_count() as u64;
+        let coordinator = Arc::new(ArcSwap::new(Arc::new(Coordinator::start(cfg.clone(), store))));
+        let metrics = Arc::new(Metrics::new(rows));
         let state = AppState { coordinator, metrics };
-        Ok(Self { cfg, store, state })
+        Ok(Self { config_path, cfg, state })
     }
 
     pub async fn run(self) -> AppResult<()> {
-        let _ = self.store;
+        if self.cfg.engine.reload_interval_mins > 0 {
+            tokio::spawn(reload::watcher(
+                self.config_path.clone(),
+                self.state.clone(),
+                self.cfg.clone(),
+            ));
+        }
         let router = api::router(self.state);
         let bind = self.cfg.api.bind.as_str();
         let listener = TcpListener::bind(bind).await.map_err(|e| {

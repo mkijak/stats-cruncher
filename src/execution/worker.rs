@@ -223,6 +223,7 @@ mod tests {
                 chunk_size_rows: 1024,
                 worker_threads: 1,
                 string_value_counts: false,
+                reload_interval_mins: 0,
             },
             api: ApiConfig { bind: "0.0.0.0:0".into() },
             searchable,

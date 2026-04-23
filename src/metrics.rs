@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const RING_SIZE: usize = 24 * 3600; // 86 400 one-second buckets
@@ -12,7 +13,7 @@ struct Bucket {
 
 pub struct Metrics {
     started_at: Instant,
-    rows_loaded: u64,
+    rows_loaded: AtomicU64,
     ring: Mutex<Vec<Bucket>>,
 }
 
@@ -38,9 +39,13 @@ impl Metrics {
     pub fn new(rows_loaded: u64) -> Self {
         Self {
             started_at: Instant::now(),
-            rows_loaded,
+            rows_loaded: AtomicU64::new(rows_loaded),
             ring: Mutex::new(vec![Bucket::default(); RING_SIZE]),
         }
+    }
+
+    pub fn set_rows_loaded(&self, n: u64) {
+        self.rows_loaded.store(n, Ordering::Relaxed);
     }
 
     pub fn record(&self, is_error: bool) {
@@ -88,7 +93,7 @@ impl Metrics {
 
         StatusSnapshot {
             uptime_secs: self.started_at.elapsed().as_secs(),
-            rows_loaded: self.rows_loaded,
+            rows_loaded: self.rows_loaded.load(Ordering::Relaxed),
             queries_1m,
             queries_1h,
             queries_24h,

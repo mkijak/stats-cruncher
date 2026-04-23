@@ -6,5 +6,6 @@ pub mod execution;
 pub mod ingestion;
 pub mod metrics;
 pub mod query;
+pub mod reload;
 pub mod resource;
 pub mod storage;
