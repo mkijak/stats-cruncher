@@ -72,6 +72,10 @@ pub struct QueryResponse {
     /// Per-column stats. Numeric columns include `sum`/`min`/`max`.
     /// Date-time columns include `oldest`/`newest` as RFC3339 strings instead.
     pub numeric: BTreeMap<String, ColumnStatsDto>,
+    /// Per-value hit counts for non-hidden string columns.
+    /// Only present when `engine.string_value_counts` is enabled.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub string_counts: BTreeMap<String, BTreeMap<String, u64>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -213,7 +217,7 @@ impl From<Response> for QueryResponse {
                 (name, dto)
             })
             .collect();
-        Self { matched_rows: r.matched_rows, numeric }
+        Self { matched_rows: r.matched_rows, numeric, string_counts: r.string_counts }
     }
 }
 

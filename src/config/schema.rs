@@ -38,6 +38,9 @@ pub struct EngineConfig {
     pub chunk_size_rows: usize,
     /// Dedicated CPU-bound worker threads. Does not apply to the Tokio pool.
     pub worker_threads: usize,
+    /// When true, non-hidden string columns include a per-value hit count in query responses.
+    #[serde(default)]
+    pub string_value_counts: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

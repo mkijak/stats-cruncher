@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -11,11 +12,12 @@ use crate::storage::{Column, ColumnStore};
 /// A CPU-bound worker. Runs on a dedicated OS thread — never on the Tokio pool
 pub struct Worker {
     store: Arc<ColumnStore>,
+    string_value_counts: bool,
 }
 
 impl Worker {
-    pub fn new(store: Arc<ColumnStore>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<ColumnStore>, string_value_counts: bool) -> Self {
+        Self { store, string_value_counts }
     }
 
     /// Pop tasks off the channel and crunch them until the channel closes.
@@ -28,7 +30,7 @@ impl Worker {
         ResultSink: Fn(Task, PartialResult),
     {
         for task in tasks {
-            let partial = execute(&task, &self.store);
+            let partial = execute(&task, &self.store, self.string_value_counts);
             results(task, partial);
         }
     }
@@ -36,9 +38,9 @@ impl Worker {
 
 /// Evaluate the query's filters against the chunk and fold numeric stats for
 /// every row the chunk contributes.
-fn execute(task: &Task, store: &ColumnStore) -> PartialResult {
+fn execute(task: &Task, store: &ColumnStore, string_value_counts: bool) -> PartialResult {
     let matched = evaluate_filter(&task.query, store, task.rows.clone());
-    aggregate(&matched, store)
+    aggregate(&matched, store, string_value_counts)
 }
 
 fn evaluate_filter(query: &Query, store: &ColumnStore, rows: Range<usize>) -> RoaringBitmap {
@@ -137,22 +139,46 @@ fn range_matches(value: f64, rf: &RangeFilter) -> bool {
     true
 }
 
-fn aggregate(matched: &RoaringBitmap, store: &ColumnStore) -> PartialResult {
+fn aggregate(matched: &RoaringBitmap, store: &ColumnStore, string_value_counts: bool) -> PartialResult {
     let mut partial = PartialResult {
         matched_rows: matched.len(),
         numeric: Default::default(),
         column_types: Default::default(),
+        string_counts: Default::default(),
     };
     for name in store.column_names() {
         let Some(col) = store.column(name) else { continue };
-        let nulls = store.null_rows_for(name);
-        let stats = match col {
-            Column::Integer(v) => fold(matched, |row| v[row] as f64, nulls),
-            Column::Float(v) => fold(matched, |row| v[row], nulls),
-            Column::DateTime(v) => fold(matched, |row| v[row] as f64, nulls),
-            Column::String(_) => continue,
-        };
-        partial.numeric.insert(name.clone(), stats);
+        match col {
+            Column::String(sc) => {
+                if !string_value_counts || store.is_hidden(name) {
+                    continue;
+                }
+                let mut counts = BTreeMap::new();
+                for code in 0..sc.dictionary.cardinality() as u32 {
+                    if let Some(postings) = sc.dictionary.postings(code) {
+                        let count = (matched & postings).len();
+                        if count > 0 {
+                            if let Some(value) = sc.dictionary.value_of(code) {
+                                counts.insert(value.to_owned(), count);
+                            }
+                        }
+                    }
+                }
+                if !counts.is_empty() {
+                    partial.string_counts.insert(name.clone(), counts);
+                }
+            }
+            _ => {
+                let nulls = store.null_rows_for(name);
+                let stats = match col {
+                    Column::Integer(v) => fold(matched, |row| v[row] as f64, nulls),
+                    Column::Float(v) => fold(matched, |row| v[row], nulls),
+                    Column::DateTime(v) => fold(matched, |row| v[row] as f64, nulls),
+                    Column::String(_) => unreachable!(),
+                };
+                partial.numeric.insert(name.clone(), stats);
+            }
+        }
     }
     partial
 }
@@ -196,6 +222,7 @@ mod tests {
                 memory_limit: u64::MAX,
                 chunk_size_rows: 1024,
                 worker_threads: 1,
+                string_value_counts: false,
             },
             api: ApiConfig { bind: "0.0.0.0:0".into() },
             searchable,
@@ -253,13 +280,17 @@ mod tests {
     }
 
     fn run_query(store: &ColumnStore, query: Query) -> PartialResult {
+        run_query_with(store, query, false)
+    }
+
+    fn run_query_with(store: &ColumnStore, query: Query, string_value_counts: bool) -> PartialResult {
         let task = Task {
             chunk_id: crate::execution::ChunkId(0),
             query_id: crate::query::QueryId(1),
             query: Arc::new(query),
             rows: 0..store.row_count(),
         };
-        execute(&task, store)
+        execute(&task, store, string_value_counts)
     }
 
     #[test]
@@ -275,6 +306,33 @@ mod tests {
         let uid = partial.numeric.get("user_id").unwrap();
         assert_eq!(uid.sum, 15.0);
         assert!(partial.numeric.get("country").is_none());
+        assert!(partial.string_counts.is_empty(), "string_value_counts disabled by default");
+    }
+
+    #[test]
+    fn string_value_counts_tallies_per_value() {
+        let store = mk_store();
+        // rows: DE(10), PL(20), DE(30), FR(40), PL(50)
+        let partial = run_query_with(&store, mk_query(&[], &[], &[]), true);
+        let counts = partial.string_counts.get("country").unwrap();
+        assert_eq!(counts.get("DE").copied(), Some(2));
+        assert_eq!(counts.get("PL").copied(), Some(2));
+        assert_eq!(counts.get("FR").copied(), Some(1));
+    }
+
+    #[test]
+    fn string_value_counts_respects_filter() {
+        let store = mk_store();
+        // must DE or PL → FR row excluded; only DE×2, PL×2 remain
+        let partial = run_query_with(
+            &store,
+            mk_query(&[("country", &["DE", "PL"])], &[], &[]),
+            true,
+        );
+        let counts = partial.string_counts.get("country").unwrap();
+        assert_eq!(counts.get("DE").copied(), Some(2));
+        assert_eq!(counts.get("PL").copied(), Some(2));
+        assert!(!counts.contains_key("FR"));
     }
 
     #[test]

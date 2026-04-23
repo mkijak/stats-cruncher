@@ -28,6 +28,12 @@ impl Aggregator {
                 .and_modify(|existing| existing.merge(&stats))
                 .or_insert(stats);
         }
+        for (name, counts) in partial.string_counts {
+            let col_entry = self.acc.string_counts.entry(name).or_default();
+            for (value, count) in counts {
+                *col_entry.entry(value).or_insert(0) += count;
+            }
+        }
         self.received_chunks += 1;
         if self.received_chunks >= self.expected_chunks {
             Some(std::mem::take(&mut self.acc))

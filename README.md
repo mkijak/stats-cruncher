@@ -49,6 +49,7 @@ Controls the concurrency model.
 
 * **`chunk_size_rows`**: Dictates the morsel size for parallel execution. This tunes the workload for CPU cache locality. Smaller values ensure fair scheduling across concurrent queries (preventing head-of-line blocking), while larger values reduce thread synchronization overhead. Leave at the default (`65_536`) unless profiling specific hardware.
 * **`worker_threads`**: The size of the dedicated compute pool used for query execution. This defines the number of physical CPU cores the application will dedicate to data crunching (note that asynchronous HTTP request handlers may cause total thread usage to slightly exceed this limit). In a heavy load scenarios leave at least 1-2 cores free for other processes.
+* **`string_value_counts`** When enabled, query responses include a per-value hit count for every string column (e.g., how many matched rows had country = "DE"). Cost scales with the number of distinct values per column, not with row count — cheap for low-cardinality enums, noticeable for high-cardinality ones.
 
 ### `[api]`
 

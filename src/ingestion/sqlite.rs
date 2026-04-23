@@ -136,7 +136,7 @@ mod tests {
         searchable.insert("occurred_at".into(), SearchableColumn { column_type: ColumnType::DateTime, hidden: false });
         AppConfig {
             source: SourceConfig::Sqlite { path, table: table.into() },
-            engine: EngineConfig { memory_limit: u64::MAX, chunk_size_rows: 1024, worker_threads: 1 },
+            engine: EngineConfig { memory_limit: u64::MAX, chunk_size_rows: 1024, worker_threads: 1, string_value_counts: false },
             api: ApiConfig { bind: "0.0.0.0:0".into() },
             searchable,
             partition_column: None,

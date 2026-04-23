@@ -54,6 +54,7 @@ impl Coordinator {
             Arc::new(Mutex::new(HashMap::new()));
 
         let worker_threads = cfg.engine.worker_threads.max(1);
+        let string_value_counts = cfg.engine.string_value_counts;
         for wid in 0..worker_threads {
             let rx = task_rx.clone();
             let tx = result_tx.clone();
@@ -61,7 +62,7 @@ impl Coordinator {
             thread::Builder::new()
                 .name(format!("stats-worker-{wid}"))
                 .spawn(move || {
-                    let worker = Worker::new(store);
+                    let worker = Worker::new(store, string_value_counts);
                     worker.run(rx.into_iter(), |task, partial| {
                         let _ = tx.send(WorkerOutput { query_id: task.query_id, partial });
                     });

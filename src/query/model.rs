@@ -52,6 +52,9 @@ pub struct Response {
     pub matched_rows: u64,
     pub numeric: BTreeMap<String, NumericStats>,
     pub column_types: BTreeMap<String, ColumnKind>,
+    /// Per-value hit counts for non-hidden string columns. Populated only when
+    /// `engine.string_value_counts` is enabled.
+    pub string_counts: BTreeMap<String, BTreeMap<String, u64>>,
 }
 
 #[derive(Debug, Clone, Copy)]

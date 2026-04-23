@@ -43,6 +43,12 @@ chunk_size_rows = 65_536
 # at least 1-2 cores free for other processes.
 worker_threads = 2
 
+# When enabled, query responses include a per-value hit count for every
+# string column (e.g., how many matched rows had country = "DE").
+# Cost scales with the number of distinct values per column, not with row
+# count — cheap for low-cardinality enums, noticeable for high-cardinality ones.
+string_value_counts = false
+
 # --- api ----------------------------------------------------------------------
 # HTTP surface exposing /status and /query.
 

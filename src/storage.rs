@@ -22,6 +22,7 @@ pub struct ColumnStore {
     names: Vec<ColumnName>,
     columns: Vec<Column>,
     lookup: HashMap<String, usize>,
+    hidden: Vec<bool>,
     row_count: u32,
     chunk_size: usize,
     zone_stats: Option<(String, Vec<(f64, f64)>)>,
@@ -33,6 +34,7 @@ impl ColumnStore {
         let mut names = Vec::with_capacity(cfg.searchable.len());
         let mut columns = Vec::with_capacity(cfg.searchable.len());
         let mut lookup = HashMap::with_capacity(cfg.searchable.len());
+        let mut hidden = Vec::with_capacity(cfg.searchable.len());
         for (idx, (name, col)) in cfg.searchable.iter().enumerate() {
             let column = match col.column_type {
                 ColumnType::Integer => Column::Integer(Vec::new()),
@@ -43,11 +45,13 @@ impl ColumnStore {
             names.push(name.clone());
             columns.push(column);
             lookup.insert(name.clone(), idx);
+            hidden.push(col.hidden);
         }
         Self {
             names,
             columns,
             lookup,
+            hidden,
             row_count: 0,
             chunk_size: cfg.engine.chunk_size_rows.max(1),
             zone_stats: None,
@@ -94,6 +98,10 @@ impl ColumnStore {
     /// Null row bitmap for a column, if any null values were ingested.
     pub fn null_rows_for(&self, name: &str) -> Option<&RoaringBitmap> {
         self.null_rows.get(name)
+    }
+
+    pub fn is_hidden(&self, name: &str) -> bool {
+        self.lookup.get(name).map_or(false, |&idx| self.hidden[idx])
     }
 
     pub fn sort_by(&mut self, partition_column: &str) -> AppResult<()> {
@@ -347,6 +355,7 @@ mod tests {
                 memory_limit: u64::MAX,
                 chunk_size_rows: 1024,
                 worker_threads: 1,
+                string_value_counts: false,
             },
             api: ApiConfig { bind: "0.0.0.0:0".to_string() },
             searchable,
