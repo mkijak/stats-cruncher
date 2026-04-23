@@ -23,7 +23,7 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SourceConfig {
-    Csv { path: PathBuf, delimiter: Option<char>, gzip: bool },
+    Csv { path: PathBuf, delimiter: Option<char>, #[serde(default)] gzip: bool },
     Sqlite { path: PathBuf, table: String },
 }
 
