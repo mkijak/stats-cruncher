@@ -2,6 +2,13 @@
 
 Spins up a local instance of stats-cruncher pre-loaded with 5 million synthetic events.
 
+## Getting started
+
+```bash
+git clone https://github.com/mkijak/stats-cruncher.git
+cd stats-cruncher/demo
+```
+
 ## Requirements
 
 - [Docker](https://docs.docker.com/get-docker/) with Compose plugin
@@ -14,8 +21,10 @@ The first run compiles the Rust binary, which can take up to a few minutes. Once
 docker compose up --build
 ```
 
+Subsequent runs, reuses cached image.
+
 ```bash
-docker compose up # subsequent runs, reuses cached image
+docker compose up 
 ```
 
 ## Endpoints

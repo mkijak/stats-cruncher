@@ -1,0 +1,30 @@
+[source]
+type = "csv"
+path = "/data/sample.csv"
+
+[engine]
+memory_limit = "1GiB"
+chunk_size_rows = 65_536
+worker_threads = 2
+string_value_counts = true
+
+[api]
+bind = "0.0.0.0:8080"
+
+[searchable.user_id]
+type = "integer"
+hidden = true
+
+[searchable.amount]
+type = "float"
+
+[searchable.country]
+type = "string"
+
+[searchable.event_type]
+type = "string"
+
+[searchable.occurred_at]
+type = "date-time"
+
+partition_column = "occurred_at"
