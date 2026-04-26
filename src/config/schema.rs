@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde::de::{self, Deserializer, Visitor};
@@ -25,6 +25,15 @@ pub struct AppConfig {
 pub enum SourceConfig {
     Csv { path: PathBuf, delimiter: Option<char>, #[serde(default)] gzip: bool },
     Sqlite { path: PathBuf, table: String },
+}
+
+impl SourceConfig {
+    /// Backing file path for file-based sources. `None` for non-file sources.
+    pub fn file_path(&self) -> Option<&Path> {
+        match self {
+            Self::Csv { path, .. } | Self::Sqlite { path, .. } => Some(path.as_path()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

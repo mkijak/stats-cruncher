@@ -1,75 +1,113 @@
+use std::path::Path;
+use std::time::SystemTime;
+
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::config::{AppConfig, SourceConfig};
 use crate::error::{AppError, AppResult};
-use crate::ingestion::Ingestor;
+use crate::ingestion::{self, Ingestor};
 use crate::resource;
 use crate::storage::{ColumnStore, RawValue};
 
 /// Streams rows out of a single-file SQLite database into [`ColumnStore`].
 pub struct SqliteIngestor {
     cfg: AppConfig,
+    last_loaded: Option<SystemTime>,
 }
 
 impl SqliteIngestor {
     pub fn new(cfg: AppConfig) -> Self {
-        Self { cfg }
+        Self { cfg, last_loaded: None }
     }
 }
 
 impl Ingestor for SqliteIngestor {
-    fn ingest(&self, store: &mut ColumnStore) -> AppResult<()> {
-        let (path, table) = match &self.cfg.source {
-            SourceConfig::Sqlite { path, table } => (path.as_path(), table.as_str()),
-            _ => unreachable!("SqliteIngestor dispatched on non-sqlite source"),
-        };
-
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| {
-                AppError::Ingestion(format!("cannot open SQLite source {}: {e}", path.display()))
-            })?;
-
-        let columns: Vec<String> = store.column_names().to_vec();
-        let select_cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
-        let sql = format!(
-            "SELECT {} FROM {}",
-            select_cols.join(", "),
-            quote_ident(table)
-        );
-
-        let mut stmt = conn.prepare(&sql).map_err(|e| {
-            AppError::Ingestion(format!("preparing SQLite SELECT {sql:?}: {e}"))
-        })?;
-        let mut rows = stmt.query([]).map_err(|e| {
-            AppError::Ingestion(format!("executing SQLite SELECT: {e}"))
-        })?;
-
-        let limit = self.cfg.engine.memory_limit;
-        let check_every = self.cfg.engine.chunk_size_rows as u64;
-        let mut ingested: u64 = 0;
-
-        while let Some(row) = rows.next().map_err(|e| {
-            AppError::Ingestion(format!("iterating SQLite row {}: {e}", ingested + 1))
-        })? {
-            let mut row_buf: Vec<RawValue<'_>> = Vec::with_capacity(columns.len());
-            for (idx, name) in columns.iter().enumerate() {
-                let raw = row.get_ref(idx).map_err(|e| {
-                    AppError::Ingestion(format!(
-                        "reading SQLite column {name:?} at row {}: {e}",
-                        ingested + 1
-                    ))
-                })?;
-                row_buf.push(map_value(name, raw)?);
-            }
-            store.push_row(&row_buf)?;
-            ingested += 1;
-            if ingested % check_every == 0 {
-                resource::check_memory(limit)?;
-            }
+    fn reload(&mut self) -> AppResult<Option<ColumnStore>> {
+        let path = self.cfg.source.file_path()
+            .expect("SqliteIngestor requires a file-backed source");
+        let before = mtime(path)?;
+        if Some(before) == self.last_loaded {
+            return Ok(None);
         }
-        Ok(())
+
+        let store = ingest_into_store(&self.cfg, path)?;
+
+        let after = mtime(path)?;
+        if after != before {
+            tracing::warn!(
+                path = %path.display(),
+                "source file changed during read; discarding partial reload"
+            );
+            return Ok(None);
+        }
+
+        self.last_loaded = Some(after);
+        Ok(Some(ingestion::finalize(store, &self.cfg)?))
     }
+}
+
+fn ingest_into_store(cfg: &AppConfig, path: &Path) -> AppResult<ColumnStore> {
+    let table = match &cfg.source {
+        SourceConfig::Sqlite { table, .. } => table.as_str(),
+        _ => unreachable!("SqliteIngestor dispatched on non-sqlite source"),
+    };
+
+    let mut store = ColumnStore::new(cfg);
+
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| {
+            AppError::Ingestion(format!("cannot open SQLite source {}: {e}", path.display()))
+        })?;
+
+    let columns: Vec<String> = store.column_names().to_vec();
+    let select_cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+    let sql = format!(
+        "SELECT {} FROM {}",
+        select_cols.join(", "),
+        quote_ident(table)
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        AppError::Ingestion(format!("preparing SQLite SELECT {sql:?}: {e}"))
+    })?;
+    let mut rows = stmt.query([]).map_err(|e| {
+        AppError::Ingestion(format!("executing SQLite SELECT: {e}"))
+    })?;
+
+    let limit = cfg.engine.memory_limit;
+    let check_every = cfg.engine.chunk_size_rows as u64;
+    let mut ingested: u64 = 0;
+
+    while let Some(row) = rows.next().map_err(|e| {
+        AppError::Ingestion(format!("iterating SQLite row {}: {e}", ingested + 1))
+    })? {
+        let mut row_buf: Vec<RawValue<'_>> = Vec::with_capacity(columns.len());
+        for (idx, name) in columns.iter().enumerate() {
+            let raw = row.get_ref(idx).map_err(|e| {
+                AppError::Ingestion(format!(
+                    "reading SQLite column {name:?} at row {}: {e}",
+                    ingested + 1
+                ))
+            })?;
+            row_buf.push(map_value(name, raw)?);
+        }
+        store.push_row(&row_buf)?;
+        ingested += 1;
+        if ingested % check_every == 0 {
+            resource::check_memory(limit)?;
+        }
+    }
+    Ok(store)
+}
+
+fn mtime(path: &Path) -> AppResult<SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map_err(|e| AppError::Ingestion(format!(
+            "cannot stat source file {}: {e}",
+            path.display()
+        )))
 }
 
 fn map_value<'a>(column: &str, value: ValueRef<'a>) -> AppResult<RawValue<'a>> {
@@ -103,7 +141,6 @@ mod tests {
     use super::*;
     use crate::config::{ApiConfig, ColumnType, EngineConfig, SearchableColumn};
     use crate::storage::Column;
-    use rusqlite::Connection;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -148,10 +185,8 @@ mod tests {
         let tmp = tmp("events.db");
         make_db(&tmp);
         let cfg = cfg_for(tmp.clone(), "events");
-        let mut store = ColumnStore::new(&cfg);
-        SqliteIngestor::new(cfg).ingest(&mut store).unwrap();
+        let store = SqliteIngestor::new(cfg).reload().unwrap().unwrap();
         assert_eq!(store.row_count(), 3);
-        // Row 1 has NULL amount, row 2 has NULL country
         assert!(store.null_rows_for("amount").map_or(false, |n| n.contains(1)));
         assert!(store.null_rows_for("country").map_or(false, |n| n.contains(2)));
         assert!(store.null_rows_for("amount").map_or(false, |n| !n.contains(0)));
@@ -170,11 +205,24 @@ mod tests {
     #[test]
     fn errors_on_missing_table() {
         let tmp = tmp("empty.db");
-        Connection::open(&tmp).unwrap(); // create empty db
+        Connection::open(&tmp).unwrap();
         let cfg = cfg_for(tmp.clone(), "does_not_exist");
-        let mut store = ColumnStore::new(&cfg);
-        let err = SqliteIngestor::new(cfg).ingest(&mut store).unwrap_err();
+        let err = match SqliteIngestor::new(cfg).reload() {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         assert!(err.to_string().to_lowercase().contains("does_not_exist"));
+        std::fs::remove_file(tmp).ok();
+    }
+
+    #[test]
+    fn second_reload_returns_none_when_unchanged() {
+        let tmp = tmp("repeat.db");
+        make_db(&tmp);
+        let cfg = cfg_for(tmp.clone(), "events");
+        let mut ing = SqliteIngestor::new(cfg);
+        assert!(ing.reload().unwrap().is_some());
+        assert!(ing.reload().unwrap().is_none());
         std::fs::remove_file(tmp).ok();
     }
 

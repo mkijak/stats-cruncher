@@ -18,28 +18,35 @@ pub struct App {
     config_path: PathBuf,
     cfg: AppConfig,
     state: AppState,
+    ingestor: Box<dyn ingestion::Ingestor>,
 }
 
 impl App {
     pub async fn bootstrap(config_path: PathBuf, cfg: AppConfig) -> AppResult<Self> {
-        let store = Arc::new(ingestion::run(&cfg).await?);
+        let ingestor = ingestion::select(&cfg);
+        let (ingestor, store) = reload::bootstrap_reload(ingestor).await?;
+        let store = Arc::new(store);
         let rows = store.row_count() as u64;
         let coordinator = Arc::new(ArcSwap::new(Arc::new(Coordinator::start(cfg.clone(), store))));
         let metrics = Arc::new(Metrics::new(rows));
         let state = AppState { coordinator, metrics };
-        Ok(Self { config_path, cfg, state })
+        Ok(Self { config_path, cfg, state, ingestor })
     }
 
     pub async fn run(self) -> AppResult<()> {
-        if self.cfg.engine.reload_interval_mins > 0 {
+        let App { config_path, cfg, state, ingestor } = self;
+        if cfg.engine.reload_interval_mins > 0 {
             tokio::spawn(reload::watcher(
-                self.config_path.clone(),
-                self.state.clone(),
-                self.cfg.clone(),
+                config_path,
+                state.clone(),
+                cfg.clone(),
+                ingestor,
             ));
+        } else {
+            drop(ingestor);
         }
-        let router = api::router(self.state);
-        let bind = self.cfg.api.bind.as_str();
+        let router = api::router(state);
+        let bind = cfg.api.bind.as_str();
         let listener = TcpListener::bind(bind).await.map_err(|e| {
             AppError::Execution(format!("binding HTTP listener to {bind:?}: {e}"))
         })?;

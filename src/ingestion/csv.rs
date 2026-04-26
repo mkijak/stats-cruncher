@@ -1,78 +1,114 @@
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use std::time::SystemTime;
 
 use flate2::read::GzDecoder;
 
 use crate::config::{AppConfig, SourceConfig};
 use crate::error::{AppError, AppResult};
-use crate::ingestion::Ingestor;
+use crate::ingestion::{self, Ingestor};
 use crate::resource;
 use crate::storage::{ColumnStore, RawValue};
 
 /// Streams a CSV file (optionally gzipped) into [`ColumnStore`].
 pub struct CsvIngestor {
     cfg: AppConfig,
+    last_loaded: Option<SystemTime>,
 }
 
 impl CsvIngestor {
     pub fn new(cfg: AppConfig) -> Self {
-        Self { cfg }
+        Self { cfg, last_loaded: None }
     }
 }
 
 impl Ingestor for CsvIngestor {
-    fn ingest(&self, store: &mut ColumnStore) -> AppResult<()> {
-        let (path, delimiter, gzip) = match &self.cfg.source {
-            SourceConfig::Csv { path, delimiter, gzip }
-                => (path.as_path(), *delimiter, *gzip),
-            _ => unreachable!("CsvIngestor dispatched on non-csv source"),
-        };
+    fn reload(&mut self) -> AppResult<Option<ColumnStore>> {
+        let path = self.cfg.source.file_path()
+            .expect("CsvIngestor requires a file-backed source");
+        let before = mtime(path)?;
+        if Some(before) == self.last_loaded {
+            return Ok(None);
+        }
 
-        let reader = open_reader(path, gzip)?;
-        let mut csv_reader = csv::ReaderBuilder::new()
-            .delimiter(resolve_delimiter(delimiter)?)
-            .has_headers(true)
-            .from_reader(reader);
+        let store = ingest_into_store(&self.cfg, path)?;
 
-        let source_indices = map_headers(&mut csv_reader, store.column_names())?;
-        let n_cols = source_indices.len();
+        // Re-stat: if the file was rewritten while streamed, the read may
+        // be torn — drop the result and let the next tick retry.
+        let after = mtime(path)?;
+        if after != before {
+            tracing::warn!(
+                path = %path.display(),
+                "source file changed during read; discarding partial reload"
+            );
+            return Ok(None);
+        }
 
-        let mut record = csv::StringRecord::new();
-        let limit = self.cfg.engine.memory_limit;
-        let check_every = self.cfg.engine.chunk_size_rows as u64;
-        let mut ingested: u64 = 0;
+        self.last_loaded = Some(after);
+        Ok(Some(ingestion::finalize(store, &self.cfg)?))
+    }
+}
 
-        loop {
-            let more = csv_reader.read_record(&mut record).map_err(|e| {
+fn ingest_into_store(cfg: &AppConfig, path: &Path) -> AppResult<ColumnStore> {
+    let (delimiter, gzip) = match &cfg.source {
+        SourceConfig::Csv { delimiter, gzip, .. } => (*delimiter, *gzip),
+        _ => unreachable!("CsvIngestor dispatched on non-csv source"),
+    };
+
+    let mut store = ColumnStore::new(cfg);
+    let reader = open_reader(path, gzip)?;
+    let mut csv_reader = csv::ReaderBuilder::new()
+        .delimiter(resolve_delimiter(delimiter)?)
+        .has_headers(true)
+        .from_reader(reader);
+
+    let source_indices = map_headers(&mut csv_reader, store.column_names())?;
+    let n_cols = source_indices.len();
+
+    let mut record = csv::StringRecord::new();
+    let limit = cfg.engine.memory_limit;
+    let check_every = cfg.engine.chunk_size_rows as u64;
+    let mut ingested: u64 = 0;
+
+    loop {
+        let more = csv_reader.read_record(&mut record).map_err(|e| {
+            AppError::Ingestion(format!(
+                "reading CSV row {} from {}: {e}",
+                ingested + 1,
+                path.display()
+            ))
+        })?;
+        if !more {
+            break;
+        }
+        let mut row_buf: Vec<RawValue<'_>> = Vec::with_capacity(n_cols);
+        for &idx in &source_indices {
+            let cell = record.get(idx).ok_or_else(|| {
                 AppError::Ingestion(format!(
-                    "reading CSV row {} from {}: {e}",
+                    "CSV row {} in {} is missing column index {idx}",
                     ingested + 1,
                     path.display()
                 ))
             })?;
-            if !more {
-                break;
-            }
-            let mut row_buf: Vec<RawValue<'_>> = Vec::with_capacity(n_cols);
-            for &idx in &source_indices {
-                let cell = record.get(idx).ok_or_else(|| {
-                    AppError::Ingestion(format!(
-                        "CSV row {} in {} is missing column index {idx}",
-                        ingested + 1,
-                        path.display()
-                    ))
-                })?;
-                row_buf.push(RawValue::Str(cell));
-            }
-            store.push_row(&row_buf)?;
-            ingested += 1;
-            if ingested % check_every == 0 {
-                resource::check_memory(limit)?;
-            }
+            row_buf.push(RawValue::Str(cell));
         }
-        Ok(())
+        store.push_row(&row_buf)?;
+        ingested += 1;
+        if ingested % check_every == 0 {
+            resource::check_memory(limit)?;
+        }
     }
+    Ok(store)
+}
+
+fn mtime(path: &Path) -> AppResult<SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map_err(|e| AppError::Ingestion(format!(
+            "cannot stat source file {}: {e}",
+            path.display()
+        )))
 }
 
 fn open_reader(path: &Path, gzip: bool) -> AppResult<Box<dyn Read>> {
@@ -165,8 +201,7 @@ mod tests {
             write!(f, "{CSV_ROWS}").unwrap();
         }
         let cfg = cfg_for(tmp.clone(), false);
-        let mut store = ColumnStore::new(&cfg);
-        CsvIngestor::new(cfg).ingest(&mut store).unwrap();
+        let store = CsvIngestor::new(cfg).reload().unwrap().unwrap();
         assert_eq!(store.row_count(), 3);
         assert!(matches!(store.column("country"), Some(Column::String(_))));
         assert!(matches!(store.column("occurred_at"), Some(Column::DateTime(_))));
@@ -183,25 +218,22 @@ mod tests {
             write!(gz, "{CSV_ROWS}").unwrap();
         }
         let cfg = cfg_for(tmp.clone(), true);
-        let mut store = ColumnStore::new(&cfg);
-        CsvIngestor::new(cfg).ingest(&mut store).unwrap();
+        let store = CsvIngestor::new(cfg).reload().unwrap().unwrap();
         assert_eq!(store.row_count(), 3);
         std::fs::remove_file(tmp).ok();
     }
 
     #[test]
     fn empty_cells_treated_as_null() {
-        // Row with empty amount and country — should ingest successfully as null values
         let tmp = tmp("nulls.csv");
         {
             let mut f = File::create(&tmp).unwrap();
             writeln!(f, "{CSV_HEADER}").unwrap();
             writeln!(f, "1001,99.50,DE,purchase,2026-01-01T00:00:00Z").unwrap();
-            writeln!(f, "1002,,  ,purchase,2026-01-02T00:00:00Z").unwrap(); // empty amount, whitespace country
+            writeln!(f, "1002,,  ,purchase,2026-01-02T00:00:00Z").unwrap();
         }
         let cfg = cfg_for(tmp.clone(), false);
-        let mut store = ColumnStore::new(&cfg);
-        CsvIngestor::new(cfg).ingest(&mut store).unwrap();
+        let store = CsvIngestor::new(cfg).reload().unwrap().unwrap();
         assert_eq!(store.row_count(), 2);
         assert!(store.null_rows_for("amount").map_or(false, |n| n.contains(1)));
         assert!(store.null_rows_for("country").map_or(false, |n| n.contains(1)));
@@ -218,9 +250,26 @@ mod tests {
             writeln!(f, "1,1.0,DE,purchase").unwrap();
         }
         let cfg = cfg_for(tmp.clone(), false);
-        let mut store = ColumnStore::new(&cfg);
-        let err = CsvIngestor::new(cfg).ingest(&mut store).unwrap_err();
+        let err = match CsvIngestor::new(cfg).reload() {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
         assert!(err.to_string().contains("occurred_at"));
+        std::fs::remove_file(tmp).ok();
+    }
+
+    #[test]
+    fn second_reload_returns_none_when_unchanged() {
+        let tmp = tmp("repeat.csv");
+        {
+            let mut f = File::create(&tmp).unwrap();
+            writeln!(f, "{CSV_HEADER}").unwrap();
+            write!(f, "{CSV_ROWS}").unwrap();
+        }
+        let cfg = cfg_for(tmp.clone(), false);
+        let mut ing = CsvIngestor::new(cfg);
+        assert!(ing.reload().unwrap().is_some());
+        assert!(ing.reload().unwrap().is_none());
         std::fs::remove_file(tmp).ok();
     }
 }

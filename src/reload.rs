@@ -3,88 +3,111 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::api::AppState;
-use crate::config::{self, AppConfig, SourceConfig};
-use crate::error::AppResult;
+use crate::config::{self, AppConfig};
+use crate::error::{AppError, AppResult};
 use crate::execution::Coordinator;
-use crate::ingestion;
+use crate::ingestion::{self, Ingestor};
+use crate::storage::ColumnStore;
 
-pub async fn watcher(config_path: PathBuf, state: AppState, initial_cfg: AppConfig) {
-    let interval_secs = initial_cfg.engine.reload_interval_mins as u64 * 60;
+pub async fn watcher(
+    config_path: PathBuf,
+    state: AppState,
+    initial_cfg: AppConfig,
+    initial_ingestor: Box<dyn Ingestor>,
+) {
+    let interval = Duration::from_secs(initial_cfg.engine.reload_interval_mins as u64 * 60);
 
     let mut cfg = initial_cfg;
     let mut last_cfg_mtime = mtime(&config_path);
-    let mut last_data_mtime = mtime(data_path(&cfg));
-    // Mtimes seen at the previous poll, set when a change is first detected.
-    let mut pending: Option<(Option<SystemTime>, Option<SystemTime>)> = None;
-    let mut sleep_secs = interval_secs;
+    let mut ingestor: Option<Box<dyn Ingestor>> = Some(initial_ingestor);
 
     loop {
-        tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+        tokio::time::sleep(interval).await;
 
+        // Config-file change: re-parse, build a fresh ingestor, run it. On any
+        // failure, keep the current state and try again next tick.
         let curr_cfg_mtime = mtime(&config_path);
-        let curr_data_mtime = mtime(data_path(&cfg));
-
-        if curr_cfg_mtime.is_none() || curr_data_mtime.is_none() {
-            tracing::warn!("reload skipped: one or more watched files are missing");
-            pending = None;
-            sleep_secs = interval_secs;
-            continue;
-        }
-
-        let any_changed =
-            curr_cfg_mtime != last_cfg_mtime || curr_data_mtime != last_data_mtime;
-
-        if !any_changed {
-            pending = None;
-            sleep_secs = interval_secs;
-            continue;
-        }
-
-        // A change was detected. Check if it matches the snapshot from the previous poll.
-        let stable = pending
-            .as_ref()
-            .is_some_and(|(pc, pd)| *pc == curr_cfg_mtime && *pd == curr_data_mtime);
-
-        if stable {
-            tracing::info!("detected stable file change, reloading");
-            match reload(&config_path, &state, &mut cfg).await {
-                Ok(rows) => {
-                    last_cfg_mtime = curr_cfg_mtime;
-                    last_data_mtime = mtime(data_path(&cfg));
-                    state.metrics.set_rows_loaded(rows);
-                    tracing::info!(rows, "reload complete");
+        if curr_cfg_mtime != last_cfg_mtime {
+            if curr_cfg_mtime.is_none() {
+                tracing::warn!("reload skipped: config file is missing");
+                continue;
+            }
+            tracing::info!("config changed, reloading");
+            match config::load(&config_path) {
+                Ok(new_cfg) => {
+                    let new_ingestor = ingestion::select(&new_cfg);
+                    match run_reload(new_ingestor).await {
+                        (next, Ok(Some(store))) => {
+                            apply(&state, &new_cfg, store);
+                            cfg = new_cfg;
+                            ingestor = Some(next);
+                            last_cfg_mtime = curr_cfg_mtime;
+                            tracing::info!("config reload complete");
+                        }
+                        (_, Ok(None)) => {
+                            tracing::warn!("config reloaded but ingestor produced no data; keeping current state");
+                        }
+                        (_, Err(e)) => {
+                            tracing::error!(error = %e, "config reload failed, keeping current state");
+                        }
+                    }
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "reload failed, keeping current state");
+                    tracing::error!(error = %e, "config parse failed, keeping current state");
                 }
             }
-            pending = None;
-            sleep_secs = interval_secs;
-        } else {
-            // First detection or still changing — record mtimes and retry in 1 minute.
-            tracing::debug!("file change detected, waiting for writes to finish");
-            pending = Some((curr_cfg_mtime, curr_data_mtime));
-            sleep_secs = 60;
+            continue;
+        }
+
+        // Data reload: hand the long-lived ingestor to a blocking task and put
+        // it back, regardless of outcome.
+        let owned = ingestor.take().expect("ingestor present");
+        let (returned, result) = run_reload(owned).await;
+        ingestor = Some(returned);
+        match result {
+            Ok(Some(store)) => {
+                apply(&state, &cfg, store);
+                tracing::info!("data reload complete");
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "data reload failed, keeping current state");
+            }
         }
     }
 }
 
-async fn reload(config_path: &Path, state: &AppState, cfg: &mut AppConfig) -> AppResult<u64> {
-    let new_cfg = config::load(config_path)?;
-    let store = Arc::new(ingestion::run(&new_cfg).await?);
-    let rows = store.row_count() as u64;
-    state.coordinator.store(Arc::new(Coordinator::start(new_cfg.clone(), store)));
-    *cfg = new_cfg;
-    Ok(rows)
+/// Run a blocking `reload()` call on the worker pool, returning the (still
+/// owned) ingestor along with the result.
+async fn run_reload(
+    mut ingestor: Box<dyn Ingestor>,
+) -> (Box<dyn Ingestor>, AppResult<Option<ColumnStore>>) {
+    tokio::task::spawn_blocking(move || {
+        let result = ingestor.reload();
+        (ingestor, result)
+    })
+    .await
+    .expect("ingestion task panicked")
 }
 
-fn data_path(cfg: &AppConfig) -> &Path {
-    match &cfg.source {
-        SourceConfig::Csv { path, .. } => path,
-        SourceConfig::Sqlite { path, .. } => path,
-    }
+fn apply(state: &AppState, cfg: &AppConfig, store: ColumnStore) {
+    let store = Arc::new(store);
+    let rows = store.row_count() as u64;
+    state.coordinator.store(Arc::new(Coordinator::start(cfg.clone(), store)));
+    state.metrics.set_rows_loaded(rows);
 }
 
 fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
+}
+
+/// Initial bootstrap reload: the first call must produce data, so a `None`
+/// result is surfaced as an error rather than silently keeping a stale store.
+pub async fn bootstrap_reload(
+    ingestor: Box<dyn Ingestor>,
+) -> AppResult<(Box<dyn Ingestor>, ColumnStore)> {
+    let (ingestor, result) = run_reload(ingestor).await;
+    let store = result?
+        .ok_or_else(|| AppError::Ingestion("initial ingestion produced no data".into()))?;
+    Ok((ingestor, store))
 }
